@@ -1,5 +1,19 @@
 # Results and limitations
 
+## Latest handoff status (2026-10-10)
+
+See the [handoff and completion roadmap](../doc/HANDOFF.zh-CN.md) for implementation priorities and exact evidence paths. The debugging milestones further below are historical, not the latest status for every task.
+
+| Task | Latest relevant evidence | Remaining acceptance |
+| --- | --- | --- |
+| block | `targeted-block-v9-online`: online success, no recorded collision | Reproduce on the receiving machine and verify state replay |
+| occluded | `targeted-occluded-v4-surface-sweep-replay`: successful response replay | Confirm with a live VLM episode |
+| mug | `targeted-mug-v7-semantic-broadside-online`: handle grounding and closure; lift blocked by 22 unknown payload samples, 0 occupied | Resolve post-grasp coverage and complete lift/hold |
+| NavigateKitchen | `mobile-v8-targeted`: 0.2676 m travel, then abort | End-to-end arrival and orientation |
+| DeliverCanToBowl | Registered custom task; rendering and robot FK checked | Online grasp, held transport, placement and retreat |
+
+The first explained tabletop video is published in the repository; it labels historical success, response replay, and partial current execution. `DeliverBrewedCoffee` is deferred, not one of the five current completion targets.
+
 ## Historical development episodes (not a benchmark)
 
 | Task | Episode | Online | Legacy evaluator success |
@@ -12,7 +26,7 @@ These are single-seed development results. Their source snapshots preserve the o
 
 ## Current scope (updated by user)
 
-The 300-episode benchmark is cancelled. Target about 10–15 practical validation runs across the five tasks; do not sweep many seeds or observation policies. Prefer offline diagnosis of retained failures before more online calls. Final video remains paused. `evaluate` defaults to at most 15 development episodes and rejects larger batches.
+The 300-episode benchmark is cancelled. Use small targeted development validation, not a seed/policy sweep. Prefer offline diagnosis of retained failures before more online calls. The first system demo is complete; update the final five-task demo after completion. `evaluate` defaults to at most 15 development episodes and rejects larger batches; this is a cap, not a requirement to launch another full batch.
 
 ## Measured engineering progress
 
@@ -57,6 +71,6 @@ All versions, failures, raw requests, and observations are retained under `runs/
 - Resolve the remaining occupied-sweep rejection after navigation map accumulation; do not launch a seed sweep.
 - Complete base-motion navigation and grasp–carry–place–retreat in an eligible kitchen scene. Current mobile code is experimental; first-grasp scoring, carried-object association, and actual successful transport still need validation.
 - Preserve the same perception capabilities for every compared policy; freeze a small validation configuration once tasks work.
-- Collect a genuine online successful and replayable episode for each task, within the reduced testing scope; organize final demos only after the video pause is lifted.
+- Collect an online successful and replayable episode for each task, within the reduced testing scope; then update the existing explained demo with the completed five-task evidence.
 
 No statistical performance or superiority claim is supported yet.

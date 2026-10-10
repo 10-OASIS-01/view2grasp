@@ -8,6 +8,8 @@ System principles and three tabletop tasks, with online runs, response replay, a
 
 Language-conditioned visual grounding for active-view grasping, navigation, and mobile manipulation. MIT-licensed project code; third-party simulators, assets, and model weights retain their own licenses.
 
+Taking over development? Start with the [project handoff and completion roadmap (Chinese)](doc/HANDOFF.zh-CN.md): current evidence, setup, remaining blockers, milestones, and acceptance criteria.
+
 ## Status
 
 This is a research prototype. Current tabletop evidence: block online success; occluded pick/place success with recorded VLM responses; mug grounding and closure completed, but the updated lift was blocked by unknown space. Three earlier online tabletop successes are preserved; that earlier implementation used inferred free-space completion and is **not evidence for the updated safety checks**. The large benchmark has been cancelled in favor of approximately 10–15 targeted development runs. See [results](docs/results.md) and the [first demo and source records](docs/demo-v1.md).

@@ -2,7 +2,7 @@
 
 RoboCasa is based on robosuite, but its current dependency set differs from the tabletop lock. Use `runtimes/robocasa` as an independent uv project. Do not activate or modify historical environments in other projects.
 
-Target tasks: `NavigateKitchen` and `DeliverBrewedCoffee`; robot: PandaOmron; sensors: mounted RGB-D cameras, calibrated robot pose and proprioception. Ground-truth fixture placement and task success belong only to the trusted scene generator/evaluator.
+Target tasks: `NavigateKitchen` and the custom `DeliverCanToBowl`; `DeliverBrewedCoffee` is deferred as a stretch task. Robot: PandaOmron; sensors: mounted RGB-D cameras, calibrated robot pose and proprioception. Ground-truth fixture placement and task success belong only to the trusted scene generator/evaluator. Follow the [handoff roadmap](../doc/HANDOFF.zh-CN.md) for current priorities; coffee records below are historical debugging evidence.
 
 Official installation: https://robocasa.ai/docs/build/html/introduction/installation.html
 
@@ -13,7 +13,7 @@ uv run python scripts/setup_robocasa.py
 uv run python scripts/download_robocasa_assets.py
 uv run view2grasp doctor --backend robocasa --output artifacts/robocasa-doctor.json
 uv run view2grasp run --task NavigateKitchen --seed 3 --root runs/mobile-development
-uv run view2grasp run --task DeliverBrewedCoffee --seed 3 --root runs/coffee-development
+uv run view2grasp run --task DeliverCanToBowl --seed 3 --root runs/can-development
 ```
 
 `sources.json` pins RoboCasa `456174f62b89b8fca99eaaf33949c29fec9cfc2a` and robosuite `5ce6643f3092639d08f7b0f90ed1c6a84f50552c`. The isolated lock resolves RoboCasa 1.0.1, robosuite 1.5.2, MuJoCo 3.3.1, and NumPy 2.2.5. These differ from the tabletop wheel/lock despite the same robosuite version label.
@@ -32,7 +32,7 @@ Navigation uses a 2 cm SE(2) lattice, 5 mm edge interpolation, and full sampled 
 
 ## Scene eligibility and outstanding work
 
-The first mobile implementation stages base and arm motion; no SLAM or liquid-spill simulation is claimed. Coffee-task scenes must require real base transport, with source and destination separated by at least 1 m; filtering is logged independently of policy execution.
+The first mobile implementation stages base and arm motion; no SLAM or liquid-spill simulation is claimed. Both manipulation task definitions require real base transport, with source and destination separated by at least 1 m and a fixed-base reach exclusion; filtering is logged independently of policy execution. `DeliverCanToBowl` transfers a rigid can into a large bowl and has passed environment rendering/FK checks, but no complete online task run is established. Its native receptacle/release condition is combined with two-second stability and at least 0.5 m of two-finger-contact transport in the evaluator.
 
 Coffee eligibility also requires the entire official 30 cm breakfast-plate neighborhood to lie outside a conservative fixed-base reach bound: sum of arm-chain translations plus 30 cm gripper/object allowance. This triangle-inequality bound ignores restrictive joint limits. Seed 3/layout 2 passed: fixture separation 3.053 m; closest destination 3.076 m; reach bound 1.383 m. The policy sees only task language, never these coordinates. At least 0.5 m two-finger-contact transport is independently scored, in addition to official success and two-second stability.
 

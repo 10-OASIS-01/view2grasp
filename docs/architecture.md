@@ -55,6 +55,14 @@ observed surfaces; the experimental mobile branch uses a filled observed AABB.
 Neither uses an oracle mesh, and neither solves occluded-shape completion.
 This difference must be resolved before claiming robust full-envelope validation.
 
+The tabletop lift also has a bounded source-surface shadow rule: during a
+fixed-orientation vertical lift, densely observed surface support may explain
+local UNKNOWN samples. The source tolerance is 0.75 mm; lateral motion and
+gaps in vertical coverage remain blocked, and observed OCCUPIED is never waived.
+Together with the mobile 3 cm bootstrap above, this is an explicit limited
+assumption, not a general unknown-space completion method. Preserve regression
+checks for handle holes, lateral motion and nearby obstacles.
+
 Known outstanding work includes coverage planning around self occlusion,
 robust map updates for moved objects, conservative full payload geometry,
 closed-loop payload tracking and end-to-end success validation. The code is a research
@@ -97,4 +105,6 @@ Refer to `robocasa.md` for exact sensor and scene-filter definitions.
 
 At the user's request, the former 300-trial protocol is no longer the work
 target. Small development validation is capped at 15 episodes, with existing
-recordings used for offline diagnosis first. Final-video production is paused.
+recordings used for offline diagnosis first. The first explained tabletop video
+has been produced; the final five-task update follows remaining acceptance work.
+See the [handoff roadmap](../doc/HANDOFF.zh-CN.md) for current implementation priorities.
