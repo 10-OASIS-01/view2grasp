@@ -2,7 +2,7 @@
 
 ## Latest handoff status (2026-10-10)
 
-See the [handoff and completion roadmap](../doc/HANDOFF.zh-CN.md) for implementation priorities and exact evidence paths. The debugging milestones further below are historical, not the latest status for every task.
+See the [handoff and completion roadmap](HANDOFF.zh-CN.md) for implementation priorities and exact evidence paths. The debugging milestones further below are historical, not the latest status for every task.
 
 | Task | Latest relevant evidence | Remaining acceptance |
 | --- | --- | --- |

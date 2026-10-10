@@ -107,4 +107,4 @@ At the user's request, the former 300-trial protocol is no longer the work
 target. Small development validation is capped at 15 episodes, with existing
 recordings used for offline diagnosis first. The first explained tabletop video
 has been produced; the final five-task update follows remaining acceptance work.
-See the [handoff roadmap](../doc/HANDOFF.zh-CN.md) for current implementation priorities.
+See the [handoff roadmap](HANDOFF.zh-CN.md) for current implementation priorities.

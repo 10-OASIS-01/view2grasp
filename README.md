@@ -8,7 +8,7 @@ System principles and three tabletop tasks, with online runs, response replay, a
 
 Language-conditioned visual grounding for active-view grasping, navigation, and mobile manipulation. MIT-licensed project code; third-party simulators, assets, and model weights retain their own licenses.
 
-Taking over development? Start with the [project handoff and completion roadmap (Chinese)](doc/HANDOFF.zh-CN.md): current evidence, setup, remaining blockers, milestones, and acceptance criteria.
+Taking over development? Start with the [project handoff and completion roadmap (Chinese)](docs/HANDOFF.zh-CN.md): current evidence, setup, remaining blockers, milestones, and acceptance criteria.
 
 ## Status
 

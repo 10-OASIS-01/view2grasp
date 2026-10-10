@@ -2,7 +2,7 @@
 
 RoboCasa is based on robosuite, but its current dependency set differs from the tabletop lock. Use `runtimes/robocasa` as an independent uv project. Do not activate or modify historical environments in other projects.
 
-Target tasks: `NavigateKitchen` and the custom `DeliverCanToBowl`; `DeliverBrewedCoffee` is deferred as a stretch task. Robot: PandaOmron; sensors: mounted RGB-D cameras, calibrated robot pose and proprioception. Ground-truth fixture placement and task success belong only to the trusted scene generator/evaluator. Follow the [handoff roadmap](../doc/HANDOFF.zh-CN.md) for current priorities; coffee records below are historical debugging evidence.
+Target tasks: `NavigateKitchen` and the custom `DeliverCanToBowl`; `DeliverBrewedCoffee` is deferred as a stretch task. Robot: PandaOmron; sensors: mounted RGB-D cameras, calibrated robot pose and proprioception. Ground-truth fixture placement and task success belong only to the trusted scene generator/evaluator. Follow the [handoff roadmap](HANDOFF.zh-CN.md) for current priorities; coffee records below are historical debugging evidence.
 
 Official installation: https://robocasa.ai/docs/build/html/introduction/installation.html
 
