@@ -1,0 +1,815 @@
+{
+  "license": "CC-BY-4.0; retain per-asset notices",
+  "sources": [
+    {
+      "repository": "robocasa/robocasa-assets",
+      "revision": "1b92c3d02ca4354984fec961357db0bff7b32166",
+      "file": "fixtures.zip",
+      "sha256": "e7bb86e9e0ef130de78200a0a7465dfb0161ed3956c65d8b3f36bdff3746c7a8",
+      "archive": "runtimes/robocasa/downloads/robocasa--robocasa-assets--fixtures.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets",
+      "bytes": 227181940
+    },
+    {
+      "repository": "robocasa/robocasa-assets",
+      "revision": "1b92c3d02ca4354984fec961357db0bff7b32166",
+      "file": "generative_textures.zip",
+      "sha256": "bc05095af306222d9a799a9b0b5b16662aa546998622ee8fd3072566ea4c31ec",
+      "archive": "runtimes/robocasa/downloads/robocasa--robocasa-assets--generative_textures.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets",
+      "bytes": 1184675536
+    },
+    {
+      "repository": "robocasa/robocasa-assets",
+      "revision": "1b92c3d02ca4354984fec961357db0bff7b32166",
+      "file": "objaverse.zip",
+      "sha256": "66a7eebef3bac855301964d35d905fc2cb44d691f007f97af08d96e83db5cc08",
+      "archive": "runtimes/robocasa/downloads/robocasa--robocasa-assets--objaverse.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects",
+      "bytes": 2163884721
+    },
+    {
+      "repository": "robocasa/robocasa-assets",
+      "revision": "1b92c3d02ca4354984fec961357db0bff7b32166",
+      "file": "textures.zip",
+      "sha256": "ba3a4dcef96e199cbd601c7cdb7eb46077fb6672611b7ac74c25a191bf0be392",
+      "archive": "runtimes/robocasa/downloads/robocasa--robocasa-assets--textures.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets",
+      "bytes": 543180421
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/blenders.zip",
+      "sha256": "989aea1bc02066f40a1661e81a41fe059cc6af96b9a9dc71ff277d4f8e87a15f",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--blenders.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 24946844
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/cabinets.zip",
+      "sha256": "d3fcbdc7601cfd727cf470458636828e7798a8a9fbe7b8de17965457242e2fbf",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--cabinets.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 30583208
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/coffee_machines.zip",
+      "sha256": "3a4bdee6956232d5f5f9cded6fc5a83ed72047d2e42af3230b26be6b517036a3",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--coffee_machines.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 44202991
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/dishwashers.zip",
+      "sha256": "aad7b6f8ff94868320c20854ad68b0d20b4f7a966e42d6aa5d50fd10aaa97489",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--dishwashers.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 31135767
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/electric_kettles.zip",
+      "sha256": "8dfe2c0f205d0ed1a45837ea6a6a60fccc763218fbaa0cf14d382ded948b790b",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--electric_kettles.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 30624436
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/fridges.zip",
+      "sha256": "10accb5fff37dc2a70d12822d729ff885364fefb932826a89e04dbc6b5c77715",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--fridges.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 57854798
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/handles.zip",
+      "sha256": "e92243d84252077482e523a577cb9dc2aef07aafae1b87eda95a464aa274beff",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--handles.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 12227543
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/hoods.zip",
+      "sha256": "ca713d1cc4a4eeea9a8f75ef4b6c9a45920e334b2acd1c1f7f9a9ad86161800e",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--hoods.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 10068743
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/microwaves.zip",
+      "sha256": "17e8f0bebbc59a7289e2ee2789d230e527b055e38a1155dd2361defdac34d74b",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--microwaves.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 35952253
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/ovens.zip",
+      "sha256": "94774e936bb712e2f4ccd2b0179485ef9a5e560afbd8b313cdd808841e42474d",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--ovens.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 22962348
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/sinks.zip",
+      "sha256": "28ac94842896c3517295061700384b86e6a123256ec700421cf7f63e59957072",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--sinks.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 45690984
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/stand_mixers.zip",
+      "sha256": "fa540e15e7f7957704d783d283fa2147651858a86ba9338ac5b1c3abbc8e4663",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--stand_mixers.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 20891187
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/stoves.zip",
+      "sha256": "7f71b03a067ea8ed01e4d8e3686020eb1945116058cf8ebffe231d981ed1814a",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--stoves.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 27392867
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/stovetops.zip",
+      "sha256": "ddfc2b322e47cf336936c1ead2158446ae7b16fbe65fe48f1b72d6888b3accd2",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--stovetops.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 19114603
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/toaster_ovens.zip",
+      "sha256": "50e7a3aa83cf7b4f673cfbad21c2f018ee41a4caef9ae89f7402e18e66dab2e9",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--toaster_ovens.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 51055625
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/toasters.zip",
+      "sha256": "4cfecba35309f4ac84f03cd97cc3721a5d80fcabeec969349ca670c253eb7103",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--toasters.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 38500809
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "fixtures_lightwheel/windows.zip",
+      "sha256": "70db83646d008e79ca842ac95a8814658f13332f20c07c32599bf2160974d26c",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--fixtures_lightwheel--windows.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/fixtures",
+      "bytes": 26406851
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/aluminum_foil.zip",
+      "sha256": "dc0012a216912c46a06b06ed051a36af8ed8e76fa68c160eb3fcfd8de40d7574",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--aluminum_foil.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3825597
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/basket.zip",
+      "sha256": "f750e1b5ecb5f4e433ce2a1a95b437608da5d56ce512c9d238316f6f61515718",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--basket.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 44344136
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/blender_jug.zip",
+      "sha256": "2ad8489093a4ae468d935953263ce97fa580f3c0582310532c91816ca6146ca3",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--blender_jug.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 11429427
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/cheese_grater.zip",
+      "sha256": "f3be3babf51d2617086bc409c6c838cd51b4fc3c1764142d8f6a7234b64a2958",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--cheese_grater.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7942441
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/chicken_drumstick.zip",
+      "sha256": "ed90a99b142b8bd481b15ee6edfb14d31b37c9cf15f4d7ceb7f5f7a3e4efe7e2",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--chicken_drumstick.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12172109
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/cinnamon.zip",
+      "sha256": "30fa4d5a253f65065f7ec24de38409b3ced07a53098c0e8506da594ddd6e6ef2",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--cinnamon.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12616704
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/colander.zip",
+      "sha256": "6586b80aaf3dad3ac3784bfa94ef9cbf884786448e534e3e98ee7d20459751ce",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--colander.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12698542
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/cookie_dough_ball.zip",
+      "sha256": "c01ea82f455160c44693d57cb0ddb20642e3d297d1d65eb745a26a8cf4525ea0",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--cookie_dough_ball.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 8250471
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/cream_cheese_stick.zip",
+      "sha256": "127c8bcb279a599335cf022822bef00a599dab7eebfe32861edbae5bc36a0ad0",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--cream_cheese_stick.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 6322008
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/digital_scale.zip",
+      "sha256": "23678f64b2996a86361f78f69a846928fae2d8695f7d8a04abf6e8ac03c3c7bc",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--digital_scale.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 4104453
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/dish_brush.zip",
+      "sha256": "59d892826cbc18c8650dc55904db37b337de64ed9c1da1141fd2e4042bd576f2",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--dish_brush.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3358034
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/dish_rack.zip",
+      "sha256": "637e5cbfb9c686e12cf54c57faed041e54ecaec6d469e46fe9f03c1f8809f654",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--dish_rack.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 17297344
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/flour_bag.zip",
+      "sha256": "c8868cb8d5ae713ff8baebae81907be50000f01977185bf68501142f51ea269f",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--flour_bag.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5310158
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/flower_vase.zip",
+      "sha256": "faabd2f31290dd99718ea130a1ea91822c070739d72a4ff4731167f90a24abf3",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--flower_vase.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 27926726
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/fruit_bowl.zip",
+      "sha256": "658b652e1dd41cc9bc7ea9dc73d2bf7c3cd37d0619eccab2f27210e17df1f322",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--fruit_bowl.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 53708300
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/glass_cup.zip",
+      "sha256": "66d8a9eb70966352f75f3e782b7ec1b534d760479b243264090e5f8db23c9cb6",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--glass_cup.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3703729
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/honey_bottle.zip",
+      "sha256": "bb50dea67be048ec266adbcb855a5141abdd5ac6440ad54a0f275d0d61fc1f66",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--honey_bottle.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 2353643
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/hotdog_bun.zip",
+      "sha256": "c9207913de3d162e7b76598486537fe649e7064bd2cb601f141d61272b4b1cd9",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--hotdog_bun.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 11071699
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/ice_cube.zip",
+      "sha256": "84256700c3ca9efbe0ea872aae02473145198063585b44bf25cb2ec4c9c95a07",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--ice_cube.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 6892503
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/ice_cube_tray.zip",
+      "sha256": "873aa60ab80c45f05679fd833627c4f0991f1e79b775e4073dc391ccc3086483",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--ice_cube_tray.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3024830
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/jar.zip",
+      "sha256": "7991dd1873b0316b1bbf2fd7d4fa8c90350becf24545bb8b3468d40a398fb748",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--jar.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 55890093
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/juice.zip",
+      "sha256": "a576a029eb947f0c3840869f06663f7d55c6e5944e24443ef8cbc4cda6913311",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--juice.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5521669
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/kebab_skewer.zip",
+      "sha256": "b69b746062a3f5795ec70d922171c96a0ef36cc11cafbdf1cb08f95f17051f5e",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--kebab_skewer.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3616906
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/kettle.zip",
+      "sha256": "34aa1538385a4c82f78c2200bb2a5c38c05d4e508e6b95028d61c39928c5bb20",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--kettle.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7832952
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/knife_block.zip",
+      "sha256": "828881bc3aa2faa45b6afc7026ddca9f8bc0164ce3c3486e5650beee5eaf3f8f",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--knife_block.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 15884148
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/lemon_wedge.zip",
+      "sha256": "6437f5128eec14537b2d142217cd2665eb4ed66041e43fdc18145dc7f98fff82",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--lemon_wedge.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12031966
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/lettuce.zip",
+      "sha256": "8e9e1a0707864d68c1dd3a2dd0757a4bf86f238a30c470f4718e99cd03af42d4",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--lettuce.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 4987982
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/marshmallow.zip",
+      "sha256": "125b36aff4026605e12c6b9f5f66990b90e3afe7d9812ed60801e8be5df6e325",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--marshmallow.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5048368
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/mayonnaise.zip",
+      "sha256": "3857f6f13bb8bbcd21907917d681940b53c4533e4ba4d128fda223bbb1267a62",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--mayonnaise.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5100496
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/measuring_cup.zip",
+      "sha256": "547a679d48107c00269e36a7a9f7ecf34327bc7d8650696009fb6063cd2484a8",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--measuring_cup.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3875718
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/mug_tree.zip",
+      "sha256": "922519c02e174297393e8ee19f4e54ee195970fc9b105b021866bd7df00f8144",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--mug_tree.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 13091882
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/mustard.zip",
+      "sha256": "e93ef643eeecb7e6cf61e0548ed912d50e4ad025092bd365aacf50bee9a7eb09",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--mustard.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 6151650
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/oil_and_vinegar_bottle.zip",
+      "sha256": "641a85629663777bddeea53de7ea0de44f7fb15f9eb9d70e01e1951307f3fd88",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--oil_and_vinegar_bottle.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 8128144
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/oven_tray.zip",
+      "sha256": "3b9421bc434974204cf1c551a74233717acc9128b8070224a675a79acc6b4996",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--oven_tray.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7225709
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pancake.zip",
+      "sha256": "102ff13a6da1607cb47fd6623d865c5d73e995c98c1140b7ca69dc704d774007",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pancake.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5666883
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/paper_towel_holder.zip",
+      "sha256": "cca9dbf8827d5d75a34bf429422ce226470dc20a91d44ef7f1fdef6da2c1e9cf",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--paper_towel_holder.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7618569
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/paprika.zip",
+      "sha256": "96c9a3f1f7ae9c935a91361ca4ea67dc34149ba613c3b3f94e789ff16f568810",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--paprika.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7827884
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/peeler.zip",
+      "sha256": "a0294698c77d4f6f47381f23afae06c5dd48e66209ba0b745ad6837033eb7684",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--peeler.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 1029076
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pickle_slice.zip",
+      "sha256": "35e84495b09cd9398dda29478645789fe8feaa77e28210a3381cea39b14032f5",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pickle_slice.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 9947611
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pitcher.zip",
+      "sha256": "d1fae8348d6592ce072b6c60c92cd2304562e913712baefdbc30cad0584d68cc",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pitcher.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3268504
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pizza.zip",
+      "sha256": "b46c2d3aff5579da1838b7317c7b729d6d837f0b8a5281b9eee976055750439f",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pizza.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 3612554
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pizza_cutter.zip",
+      "sha256": "1e28caa0f4c0d4ccbf337bbd56d5fb9edd63a7129df470eb284d0cccff9fcf75",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pizza_cutter.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 2976153
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/placemat.zip",
+      "sha256": "a10deced863aeb420581eaad0ea9d5659145f0a98b7f6321069b0a1acd4947a5",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--placemat.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 36631948
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/plant.zip",
+      "sha256": "20ce9dcf6b6a728dc1cfde4ec8782061b28a4e986376779c3737a87a5a5b35dd",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--plant.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 16467767
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/pot.zip",
+      "sha256": "418748fd6f68822a7c083ea4a070830319aee52aff5746137cb03f857cd9d57b",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--pot.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 10730401
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/reamer.zip",
+      "sha256": "791c42f6ec1549baa30165f1b6614630ff921ac473fb01b376ecf2546ed0ed3e",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--reamer.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 9366943
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/salt_and_pepper_shaker.zip",
+      "sha256": "9a830c565849a37071621b210c1087247f61e136e1076668ae3917816c759378",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--salt_and_pepper_shaker.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 23586312
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/sandwich_bread.zip",
+      "sha256": "1a61c3571266acf0f0da715f2e7c7d8479882629dd87ac39f02c463095df9272",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--sandwich_bread.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 13456332
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/saucepan.zip",
+      "sha256": "ca77926ddc0c2d409e271658927cdc08e1b6e2e60b510f75b16b2d2881a9be92",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--saucepan.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 13166133
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/shrimp.zip",
+      "sha256": "847fc120fe425726f2017d4ce1d0ce2665ad7e80dc4ab9e2075f49911d48dfa4",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--shrimp.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5761029
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/soap_dispenser.zip",
+      "sha256": "c76ab9494f8f282a3e0a985facc4dbe9caff1108db20aaee005408561f748e7a",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--soap_dispenser.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 5158978
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/spray.zip",
+      "sha256": "82c2fc39b3a6e7836d2a44f4e72dae287278c1049e448ed2466ea8201f275517",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--spray.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 1393390
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/stool.zip",
+      "sha256": "4440200163b4c52bbc3d5c1017631af5bd62b5e66125da2d6e4b7d12ee13b8a7",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--stool.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 15438900
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/strainer.zip",
+      "sha256": "db5ffd5d75bebc9009782b20961339a164713ba37a7f7e4d6937e937dd93fc62",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--strainer.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12053343
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/straw.zip",
+      "sha256": "a8344671c2ad2f3830aeea878e96a7d9289c2e99f2896a6a97ed533a902d3580",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--straw.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 14482099
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/sugar_cube.zip",
+      "sha256": "3db61c73fdc200e37ef6d2447477c60d9a437a96eb329494839c71b9649c2614",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--sugar_cube.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7692565
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/syrup_bottle.zip",
+      "sha256": "f9a100eb9b89e7a925e63a603daa9a9473903dfd0bb24d8467516d88e26558b8",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--syrup_bottle.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 2480265
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tiered_basket.zip",
+      "sha256": "44419cdfbf0c2063ba2036a5bfee36bda3b7dc727d29c4dead3a4e1fe6e559a5",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tiered_basket.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 12033005
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tiered_shelf.zip",
+      "sha256": "0db1f88fa02667bce09cfe402993f556d1432434aa8557e7d23fbf634eba811f",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tiered_shelf.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 18751567
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tomato_slice.zip",
+      "sha256": "4b4905f8e0ab177714fc07684756bedfb6b93913f22c20bc2c54886971155e44",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tomato_slice.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 13765370
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tongs.zip",
+      "sha256": "d0c765552264483dc1cdc1a7fc43055090a7d8e8033a8ce87318664cb9b4e439",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tongs.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 1556668
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tray.zip",
+      "sha256": "5dc5c6a5768e3e9317165b4ba53e67ff3d5be915b512f1a3ee68f43ae11cc3d0",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tray.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 10070030
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/tupperware.zip",
+      "sha256": "cfad494e46d924cdc5578e1b647942ccc4f9e4d0c07df3a761fc8fb8a2b8dca9",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--tupperware.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 2435849
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/turkey_slice.zip",
+      "sha256": "9c98292a60256047e0b9bcc29f91242a1b204c9ee441523f484aab899ba1ab36",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--turkey_slice.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7379367
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/turmeric.zip",
+      "sha256": "d2b9f6a248376d53c368c81427b59a3bb9a11fa3ca73a5986759fc3cbd60466d",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--turmeric.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 7940429
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/utensil_rack.zip",
+      "sha256": "110947c52e9c1a274877c2b97fa1d13a0228aa0aa4f271a742a92d0812159f10",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--utensil_rack.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 32892885
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/utensil_set.zip",
+      "sha256": "1dfe3172c3464c1b090f0eb6076c2aaeb3a32c47bfa477f34934ed5dd519cd1d",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--utensil_set.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 31919064
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/whisk.zip",
+      "sha256": "d2b75ff91f8a367389ba380680b81232738c2d937ed5171477daf1bd515650b6",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--whisk.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 1410930
+    },
+    {
+      "repository": "nvidia/PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF",
+      "revision": "420a04af939c34873e6839a586b70844baf28aab",
+      "file": "objects_lightwheel/wooden_spoon.zip",
+      "sha256": "2356a98bc9c8b29e87c1da51e9a3fcae55ab03ed08de8a8ff203ebaf5a2cd17e",
+      "archive": "runtimes/robocasa/downloads/nvidia--PhysicalAI-Robotics-Manipulation-Objects-Kitchen-MJCF--objects_lightwheel--wooden_spoon.zip",
+      "destination": "runtimes/robocasa/vendor/robocasa/robocasa/models/assets/objects/lightwheel",
+      "bytes": 8783646
+    }
+  ]
+}

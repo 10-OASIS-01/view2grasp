@@ -1,0 +1,4 @@
+# Targeted handled-object perception debugging only; not a benchmark protocol.
+# One extra actual view is allowed to expose the mug / handle self-shadow.
+max_observations: 9
+planning_seconds: 30

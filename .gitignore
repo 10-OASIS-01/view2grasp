@@ -1,0 +1,24 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+runs/
+*.egg-info/
+.DS_Store
+MUJOCO_LOG.TXT
+runtimes/*/vendor/
+checkpoints/
+runtimes/*/downloads/
+*.part
+
+# Publish the current demo only; keep development diagnostics and drafts local.
+artifacts/*
+!artifacts/demo-v1/
+artifacts/demo-v1/*
+!artifacts/demo-v1/view2grasp_explained_1080p.mp4
+!artifacts/demo-v1/view2grasp_explained_1080p.json
+!artifacts/demo-v1/view2grasp_explained_1080p.srt
+!artifacts/demo-v1/view2grasp_explained_1080p.qa.json
+!artifacts/demo-v1/view2grasp_explained_1080p_previews/
+artifacts/demo-v1/view2grasp_explained_1080p_previews/*
+!artifacts/demo-v1/view2grasp_explained_1080p_previews/00_intro.jpg

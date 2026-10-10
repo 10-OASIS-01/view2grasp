@@ -1,0 +1,34 @@
+{
+  "targeted-block-v9-online": {
+    "title": "01  方块抓起",
+    "subtitle": "Lift the red block",
+    "version": "CURRENT / ONLINE",
+    "historical": false,
+    "cn": "从图像定位红色方块，闭爪、抬升并保持。",
+    "en": "Image grounding, approach, closure, lift and hold."
+  },
+  "targeted-occluded-v4-surface-sweep-replay": {
+    "title": "02  遮挡取放",
+    "subtitle": "Move the blue block to the yellow region",
+    "version": "CURRENT / RESPONSE REPLAY",
+    "historical": false,
+    "cn": "复用已录制的 VLM 响应；规划与仿真执行重新运行。",
+    "en": "Recorded VLM responses; planning and simulation executed again."
+  },
+  "final-online": {
+    "title": "03  杯柄抓取 · 早期成功记录",
+    "subtitle": "Mug handle grasp / earlier online run",
+    "version": "EARLIER BUILD / ONLINE",
+    "historical": true,
+    "cn": "早期版本完成杯柄提起；新版安全检查仍待复验。",
+    "en": "Earlier build lifted the mug. Updated safety checks still need validation."
+  },
+  "targeted-mug-v7-semantic-broadside-online": {
+    "title": "04  杯柄抓取 · 新版进展",
+    "subtitle": "Current mug run / safety stop before lift",
+    "version": "CURRENT / ONLINE / PARTIAL",
+    "historical": false,
+    "cn": "定位杯柄并执行闭爪；抬升因未观测空间被拒绝。",
+    "en": "Handle grounding and closure executed; unknown space blocks the lift."
+  }
+}

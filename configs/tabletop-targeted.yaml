@@ -1,0 +1,2 @@
+# Targeted online perception debugging only; not a benchmark protocol.
+max_observations: 8

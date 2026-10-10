@@ -1,0 +1,462 @@
+{
+  "kind": "development_demo",
+  "canvas": [
+    1920,
+    1080
+  ],
+  "fps": 30,
+  "duration_seconds": 291.3,
+  "audio": false,
+  "sources": [
+    {
+      "episode": "runs/targeted-block-v9-online/block_active_0003",
+      "result": {
+        "task": "block",
+        "seed": 3,
+        "strategy": "active",
+        "online": true,
+        "success": true,
+        "first_grasp_success": true,
+        "observations": 8,
+        "attempts": 1,
+        "vlm_calls": 8,
+        "inference_seconds": 56.47550779208541,
+        "planning_seconds": 62.4909831660334,
+        "elapsed_seconds": 147.13245570799336,
+        "failure": "",
+        "collision": false,
+        "grounding_types": [
+          "box",
+          "polygon"
+        ],
+        "segmentation_calls": 17,
+        "perception_seconds": 8.847800664952956,
+        "official_success": null,
+        "collision_free_success": true,
+        "path_length_m": null,
+        "held_path_length_m": null,
+        "geometry_rejections": []
+      },
+      "annotation": {
+        "title": "01  方块抓起",
+        "subtitle": "Lift the red block",
+        "cn": "从图像定位红色方块，闭爪、抬升并保持。",
+        "en": "Image grounding, approach, closure, lift and hold.",
+        "historical": false,
+        "version": "CURRENT / ONLINE"
+      },
+      "source_mode": "ONLINE VLM",
+      "source_sha256": "776d1f87458b7aa70149b6cfb794887bf25e4f59b101adb4c166a00a7d4fc53c",
+      "execution_sha256": "63d2d55b75db7e25424d863b7f9282aa9bfc9eb886e714d38f151575e34a9a09"
+    },
+    {
+      "episode": "runs/targeted-occluded-v4-surface-sweep-replay/occluded_active_0003",
+      "result": {
+        "task": "occluded",
+        "seed": 3,
+        "strategy": "active",
+        "online": false,
+        "success": true,
+        "first_grasp_success": true,
+        "observations": 8,
+        "attempts": 1,
+        "vlm_calls": 8,
+        "inference_seconds": 0.01336245913989842,
+        "planning_seconds": 37.5510512071196,
+        "elapsed_seconds": 65.44697583303787,
+        "failure": "",
+        "collision": false,
+        "grounding_types": [
+          "box",
+          "polygon",
+          "polygon"
+        ],
+        "segmentation_calls": 20,
+        "perception_seconds": 9.383336329250596,
+        "official_success": null,
+        "collision_free_success": true,
+        "path_length_m": null,
+        "held_path_length_m": null,
+        "geometry_rejections": []
+      },
+      "annotation": {
+        "title": "02  遮挡取放",
+        "subtitle": "Move the blue block to the yellow region",
+        "cn": "复用已录制的 VLM 响应；规划与仿真执行重新运行。",
+        "en": "Recorded VLM responses; planning and simulation executed again.",
+        "historical": false,
+        "version": "CURRENT / RESPONSE REPLAY"
+      },
+      "source_mode": "VLM RESPONSE REPLAY",
+      "source_sha256": "776d1f87458b7aa70149b6cfb794887bf25e4f59b101adb4c166a00a7d4fc53c",
+      "execution_sha256": "1a392709b8030f136fac7871f7678c31fe06a0ed7a076b39cb5dcc14e29abe7f"
+    },
+    {
+      "episode": "runs/final-online/mug_active_0003",
+      "result": {
+        "task": "mug",
+        "seed": 3,
+        "strategy": "active",
+        "online": true,
+        "success": true,
+        "first_grasp_success": true,
+        "observations": 6,
+        "attempts": 1,
+        "vlm_calls": 6,
+        "inference_seconds": 49.792134666931815,
+        "planning_seconds": 21.573439250001684,
+        "elapsed_seconds": 88.90659358305857,
+        "failure": "",
+        "collision": false
+      },
+      "annotation": {
+        "title": "03  杯柄抓取 · 早期成功记录",
+        "subtitle": "Mug handle grasp / earlier online run",
+        "cn": "早期版本完成杯柄提起；新版安全检查仍待复验。",
+        "en": "Earlier build lifted the mug. Updated safety checks still need validation.",
+        "historical": true,
+        "version": "EARLIER BUILD / ONLINE"
+      },
+      "source_mode": "EARLIER BUILD / ONLINE VLM",
+      "source_sha256": "4ff8e6e3db73050744c82fbf962531092373eaed00768fb966abdef9c76de7b0",
+      "execution_sha256": "99f1e4ca2206f955d739e32a1332973578e21a775e0d47c774dd96392355dbc1"
+    },
+    {
+      "episode": "runs/targeted-mug-v7-semantic-broadside-online/mug_active_0003",
+      "result": {
+        "task": "mug",
+        "seed": 3,
+        "strategy": "active",
+        "online": true,
+        "success": false,
+        "first_grasp_success": false,
+        "observations": 9,
+        "attempts": 1,
+        "vlm_calls": 9,
+        "inference_seconds": 76.02114950004034,
+        "planning_seconds": 66.02962037408724,
+        "elapsed_seconds": 182.69727862498257,
+        "failure": "planning: lift carried object unknown space",
+        "collision": false,
+        "grounding_types": [
+          "box",
+          "polygon",
+          "points"
+        ],
+        "segmentation_calls": 25,
+        "perception_seconds": 16.263366666971706,
+        "official_success": null,
+        "collision_free_success": false,
+        "path_length_m": null,
+        "held_path_length_m": null,
+        "geometry_rejections": []
+      },
+      "annotation": {
+        "title": "04  杯柄抓取 · 新版进展",
+        "subtitle": "Current mug run / safety stop before lift",
+        "cn": "定位杯柄并执行闭爪；抬升因未观测空间被拒绝。",
+        "en": "Handle grounding and closure executed; unknown space blocks the lift.",
+        "historical": false,
+        "version": "CURRENT / ONLINE / PARTIAL"
+      },
+      "source_mode": "ONLINE VLM",
+      "source_sha256": "ad31ffbfc7c03865dbbdfc5e7c3d9371b43b6dc563ad88e8638dde8c1521b43e",
+      "execution_sha256": "ae3b50fdbd514f2ccfc4a56c731685738793daeacf0bd668385b717338c6ed72"
+    }
+  ],
+  "segments": [
+    {
+      "label": "intro",
+      "start": 0.0,
+      "end": 9.0
+    },
+    {
+      "label": "pipeline",
+      "start": 9.0,
+      "end": 21.0
+    },
+    {
+      "label": "method_active_view",
+      "start": 21.0,
+      "end": 31.0
+    },
+    {
+      "label": "method_semantics",
+      "start": 31.0,
+      "end": 39.0
+    },
+    {
+      "label": "method_backprojection",
+      "start": 39.0,
+      "end": 49.0,
+      "type": "explanatory_animation"
+    },
+    {
+      "label": "method_ray_candidates",
+      "start": 49.0,
+      "end": 63.0,
+      "type": "explanatory_animation"
+    },
+    {
+      "label": "method_unknown_space",
+      "start": 63.0,
+      "end": 75.0,
+      "type": "explanatory_animation"
+    },
+    {
+      "label": "method_motion_plan",
+      "start": 75.0,
+      "end": 87.0,
+      "type": "explanatory_animation"
+    },
+    {
+      "label": "block_chapter",
+      "start": 87.0,
+      "end": 93.0
+    },
+    {
+      "label": "block_view_1",
+      "start": 93.0,
+      "end": 94.2
+    },
+    {
+      "label": "block_view_2",
+      "start": 94.2,
+      "end": 95.4
+    },
+    {
+      "label": "block_view_3",
+      "start": 95.4,
+      "end": 96.6
+    },
+    {
+      "label": "block_view_4",
+      "start": 96.6,
+      "end": 97.8
+    },
+    {
+      "label": "block_view_5",
+      "start": 97.8,
+      "end": 99.0
+    },
+    {
+      "label": "block_view_6",
+      "start": 99.0,
+      "end": 100.2
+    },
+    {
+      "label": "block_view_7",
+      "start": 100.2,
+      "end": 101.4
+    },
+    {
+      "label": "block_view_8",
+      "start": 101.4,
+      "end": 102.6
+    },
+    {
+      "label": "block_geometry",
+      "start": 102.6,
+      "end": 110.6
+    },
+    {
+      "label": "block_execution",
+      "start": 110.6,
+      "end": 122.2,
+      "source": "runs/targeted-block-v9-online/block_active_0003/execution.mp4",
+      "speed": 1
+    },
+    {
+      "label": "block_outcome",
+      "start": 122.2,
+      "end": 129.2
+    },
+    {
+      "label": "occluded_chapter",
+      "start": 129.2,
+      "end": 135.2
+    },
+    {
+      "label": "occluded_view_1",
+      "start": 135.2,
+      "end": 136.4
+    },
+    {
+      "label": "occluded_view_2",
+      "start": 136.4,
+      "end": 137.6
+    },
+    {
+      "label": "occluded_view_3",
+      "start": 137.6,
+      "end": 138.8
+    },
+    {
+      "label": "occluded_view_4",
+      "start": 138.8,
+      "end": 140.0
+    },
+    {
+      "label": "occluded_view_5",
+      "start": 140.0,
+      "end": 141.2
+    },
+    {
+      "label": "occluded_view_6",
+      "start": 141.2,
+      "end": 142.4
+    },
+    {
+      "label": "occluded_view_7",
+      "start": 142.4,
+      "end": 143.6
+    },
+    {
+      "label": "occluded_view_8",
+      "start": 143.6,
+      "end": 144.8
+    },
+    {
+      "label": "occluded_geometry",
+      "start": 144.8,
+      "end": 152.8
+    },
+    {
+      "label": "occluded_execution",
+      "start": 152.8,
+      "end": 174.3,
+      "source": "runs/targeted-occluded-v4-surface-sweep-replay/occluded_active_0003/execution.mp4",
+      "speed": 1
+    },
+    {
+      "label": "occluded_outcome",
+      "start": 174.3,
+      "end": 181.3
+    },
+    {
+      "label": "mug_chapter",
+      "start": 181.3,
+      "end": 187.3
+    },
+    {
+      "label": "mug_view_1",
+      "start": 187.3,
+      "end": 188.5
+    },
+    {
+      "label": "mug_view_2",
+      "start": 188.5,
+      "end": 189.7
+    },
+    {
+      "label": "mug_view_3",
+      "start": 189.7,
+      "end": 190.9
+    },
+    {
+      "label": "mug_view_4",
+      "start": 190.9,
+      "end": 192.1
+    },
+    {
+      "label": "mug_view_5",
+      "start": 192.1,
+      "end": 193.3
+    },
+    {
+      "label": "mug_view_6",
+      "start": 193.3,
+      "end": 194.5
+    },
+    {
+      "label": "mug_geometry",
+      "start": 194.5,
+      "end": 202.5
+    },
+    {
+      "label": "mug_execution",
+      "start": 202.5,
+      "end": 221.1,
+      "source": "runs/final-online/mug_active_0003/execution.mp4",
+      "speed": 1
+    },
+    {
+      "label": "mug_outcome",
+      "start": 221.1,
+      "end": 228.1
+    },
+    {
+      "label": "mug_chapter",
+      "start": 228.1,
+      "end": 234.1
+    },
+    {
+      "label": "mug_view_1",
+      "start": 234.1,
+      "end": 235.3
+    },
+    {
+      "label": "mug_view_2",
+      "start": 235.3,
+      "end": 236.5
+    },
+    {
+      "label": "mug_view_3",
+      "start": 236.5,
+      "end": 237.7
+    },
+    {
+      "label": "mug_view_4",
+      "start": 237.7,
+      "end": 238.9
+    },
+    {
+      "label": "mug_view_5",
+      "start": 238.9,
+      "end": 240.1
+    },
+    {
+      "label": "mug_view_6",
+      "start": 240.1,
+      "end": 241.3
+    },
+    {
+      "label": "mug_view_7",
+      "start": 241.3,
+      "end": 242.5
+    },
+    {
+      "label": "mug_view_8",
+      "start": 242.5,
+      "end": 243.7
+    },
+    {
+      "label": "mug_view_9",
+      "start": 243.7,
+      "end": 244.9
+    },
+    {
+      "label": "mug_geometry",
+      "start": 244.9,
+      "end": 252.9
+    },
+    {
+      "label": "mug_execution",
+      "start": 252.9,
+      "end": 272.3,
+      "source": "runs/targeted-mug-v7-semantic-broadside-online/mug_active_0003/execution.mp4",
+      "speed": 1
+    },
+    {
+      "label": "mug_outcome",
+      "start": 272.3,
+      "end": 279.3
+    },
+    {
+      "label": "outro",
+      "start": 279.3,
+      "end": 291.3
+    }
+  ],
+  "note": "Bilingual burned-in captions. Static observation review is separate from execution. Source footage is upscaled, not native 1080p. Historical and response-replay records are labeled."
+}

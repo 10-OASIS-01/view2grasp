@@ -1,0 +1,6 @@
+# Development only. Never use this abbreviated budget as the formal protocol.
+perception_backend: rgbd
+image_size: 512
+navigation_observations: 8
+mobile_observations: 8
+planning_seconds: 20

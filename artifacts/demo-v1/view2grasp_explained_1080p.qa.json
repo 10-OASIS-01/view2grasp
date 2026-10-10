@@ -1,0 +1,16 @@
+{
+  "video": "artifacts/demo-v1/view2grasp_explained_1080p.mp4",
+  "size": [
+    1920,
+    1080
+  ],
+  "fps": 30.0,
+  "duration_seconds": 291.3,
+  "decoded_frames": 8739,
+  "complete_decode": "passed",
+  "source_hashes": "passed",
+  "result_labels": "passed",
+  "execution_speed": "1x; all source frames retained",
+  "timeline": "contiguous",
+  "method_sections": 6
+}

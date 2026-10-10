@@ -1,0 +1,11 @@
+max_observations: 6
+max_attempts: 2
+image_size: 512
+voxel_resolution_m: 0.005
+planning_seconds: 120
+max_candidates: 48
+# Reduced user-requested scope: 5 tasks x 3 development seeds x active = 15.
+validation_seeds: [3, 4, 5]
+# Legacy compatibility only; evaluate no longer consumes test_seeds.
+test_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109,
+             110, 111, 112, 113, 114, 115, 116, 117, 118, 119]

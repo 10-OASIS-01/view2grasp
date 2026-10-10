@@ -1,0 +1,9 @@
+# Targeted online integration only; this is not a seed sweep or benchmark.
+perception_backend: rgbd
+image_size: 512
+# Layout 2 starts roughly 2.3 m from the toaster oven. Four initial camera
+# choices plus 25 cm closed-loop motion prefixes make 12 observations
+# geometrically insufficient; 16 is the smallest validated development budget.
+navigation_observations: 16
+mobile_observations: 12
+planning_seconds: 20

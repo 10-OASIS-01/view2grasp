@@ -1,0 +1,549 @@
+from dataclasses import asdict,replace
+from pathlib import Path
+import json,time,traceback,hashlib,copy
+import zipfile
+import numpy as np
+from .sim import Simulator,INSTRUCTIONS
+from .types import EpisodeRecord
+from .geometry import cloud,fit_table,grasp_candidates,pixel_point,project,unproject,part_cloud
+from .mapping import DepthMap
+from .planning import RobotModel,Planner,time_parameterize
+from .vlm import VLM
+from .evaluation import Evaluator
+from .recording import save_observation,save_episode
+from .config import ExperimentConfig,fingerprint
+from .view_advisor import nominal_grasp,swept_unknown,suggest_views
+from .observation_policy import tabletop_view
+from .grounding import GroundingResolver,track_surface
+
+
+def leading_shell(points,resolution=.005):
+    """Highest observed sweep point per XY voxel for upward-motion visibility."""
+    points=np.asarray(points)
+    if not len(points):return points.reshape(0,3)
+    keys=np.round(points[:,:2]/resolution).astype(np.int32)
+    order=np.argsort(points[:,2])[::-1]
+    _,first=np.unique(keys[order],axis=0,return_index=True)
+    return points[order[first]]
+
+
+def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,config=None):
+    config=config or ExperimentConfig()
+    out=Path(root)/f"{task}_{strategy}_{seed:04d}"
+    if out.exists() and any(out.iterdir()): raise FileExistsError(f"Refusing to overwrite complete or partial episode: {out}")
+    out.mkdir(parents=True,exist_ok=True)
+    (out/"manifest.json").write_text(json.dumps({"source_sha256":fingerprint(config),"task":task,"seed":seed,
+        "strategy":strategy,"online":replay is None,**config.model_dump(),"approach_cone_degrees":15},indent=2))
+    package=Path(__file__).parent;repository=package.parent.parent
+    with zipfile.ZipFile(out/'source_snapshot.zip','w',compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(package.glob('*.py')):archive.write(path,'src/view2grasp/'+path.name)
+        for name in ('uv.lock','pyproject.toml','LICENSE'):
+            if (repository/name).exists():archive.write(repository/name,name)
+        archive.writestr('episode_config.json',config.model_dump_json(indent=2))
+    record=EpisodeRecord(task,seed,strategy,online=replay is None)
+    events=[]; history=[]; start=time.monotonic(); sim=None; vlm=None
+    robot_depths={}
+    rng=np.random.default_rng(seed)
+    def event(kind,**kwargs):
+        item={"elapsed":time.monotonic()-start,"kind":kind,**kwargs}; events.append(item)
+        print(json.dumps(item,ensure_ascii=False),flush=True)
+    try:
+        sim=Simulator(task,seed,config.image_size)
+        evaluator=Evaluator(sim); sim.evaluator=evaluator
+        robot=RobotModel(sim.robot_xml,sim.joint_names,sim.eef_name)
+        sim.validate_initial_proxies(robot.points(sim.q,sim.gripper_q)[0])
+        map_=DepthMap(config.voxel_resolution_m); map_.certify_home(robot.points(sim.q,sim.gripper_q)[0],robot.volumes(sim.q,sim.gripper_q))
+        planner=Planner(robot,map_,rng)
+        planner.gripper=sim.gripper_q
+        vlm=VLM(out/"vlm",replay=replay)
+        resolver=GroundingResolver.from_config(config)
+        event('perception_backend',sam_available=resolver.segmenter is not None,reason=resolver.sam_unavailable_reason)
+        def observe():
+            obs=sim.observe(); record.observations+=1
+            save_observation(out/"observations",obs)
+            self_depth=robot.depth(obs);robot_depths[obs.frame_id]=self_depth
+            map_.integrate(obs,robot.points(obs.q,obs.gripper_q)[0],self_depth,
+                robot.volumes(obs.q,obs.gripper_q),robot.visual_volumes(obs.q,obs.gripper_q))
+            return obs
+        def execute(path,grip,phase):
+            sim.phase=phase
+            np.save(out/f"path_{len(events):03d}_{phase}.npy",path)
+            event("execute",phase=phase,waypoints=len(path))
+            for q in time_parameterize(path): sim.step(q,grip)
+            for _ in range(8): sim.step(path[-1],grip)
+            if np.max(np.abs(sim.q-path[-1]))>.12: raise RuntimeError("execution: joint tracking error")
+        obs=observe(); initial_view=obs.view
+        map_.set_table(fit_table(cloud(obs),rng))
+        if strategy=='active':
+            timer=time.monotonic();nominal=None if task=='mug' else nominal_grasp(robot,map_,obs)
+            if nominal is not None:
+                unknown=swept_unknown(robot,map_,obs,nominal)
+                # The handle grasp's large wrist turn needs two complementary
+                # pre-grasp coverage views to make the strict RRT corridor
+                # observable. The final frame can still refresh the moved
+                # gripper / payload. Remaining unobserved projection gaps are
+                # rejected, never completed by neighbor voting.
+                initial_budget=1
+                advice=suggest_views(robot,obs,unknown,budget=max(0,min(initial_budget,config.max_observations-4)))
+                history.append({'coverage_advice':advice})
+                (out/'view_advice.json').write_text(json.dumps(advice,indent=2))
+                event('view_advice',**advice)
+            elif task=='mug':
+                # Robot-sweep coverage advice can be orthogonal to a viable
+                # handle ray. Let the VLM choose one broadside from the actual
+                # overview; targeted map recovery follows after grounding.
+                history.append({'feedback':
+                    'No coverage-only view is prescribed for handle grounding. Infer the handle plane from this image and choose the reachable -X-side broadside described in the task.'})
+            record.planning_seconds+=time.monotonic()-timer
+        pending_decision=None;grounding_repairs={}
+        while record.observations<config.max_observations and record.attempts<config.max_attempts:
+            # Freeze the handled-object representation rule before validation:
+            # one chosen broadside view, then a handle grounding or abort. This
+            # preserves the approach ray and reserves evidence for planning and
+            # the post-close payload sweep instead of test-time view shopping.
+            force_at=2 if task=="mug" else config.max_observations-3
+            decision=pending_decision or vlm.decide(obs,INSTRUCTIONS[task],history,
+                force_grasp=record.observations>=force_at or strategy!="active")
+            pending_decision=None
+            save_observation(out/"observations",obs,decision)
+            event("decision",**decision.model_dump())
+            if decision.action=="abort": record.failure="agent_abort: "+decision.reason; break
+            if decision.action=="observe":
+                sim.move_camera(decision.azimuth,decision.elevation,decision.distance)
+                # Preserve the agent's visual inference (for example the mug's
+                # handle direction) as compact textual memory. Images are still
+                # acquired only after moving the camera; no unseen frame enters
+                # history.
+                history.append({"view":obs.view,"decision":decision.model_dump(),
+                    "feedback":"requested new observation"}); obs=observe(); continue
+            timer=time.monotonic()
+            try:
+                resolved=resolver.resolve_grasp(obs,decision,map_.table_z,robot_depths.get(obs.frame_id))
+                decision=resolved.decision
+                record.grounding_types.extend(resolved.report['kinds'])
+                record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds
+                from .recording import save_grounding_result
+                save_grounding_result(out,obs,resolved)
+                candidates,target=grasp_candidates(obs,decision,map_.table_z,robot.pose(obs.q)[1],robot.grasp_center_offset(),map_.surface,resolved.object_mask,resolved.part_mask)
+                if not candidates:raise ValueError('no candidates from observed grasp geometry')
+                target_part=part_cloud(obs,decision,target,resolved.part_mask)
+                # The 2-D part box identifies the intended component, but a
+                # broadside view may expose only its front strip. Associate the
+                # locally connected, actually observed 3-D surfaces around the
+                # click so both sides of a handle bar can be legitimate finger
+                # contacts. This remains image/depth based and never uses IDs.
+                anchor=candidates[0].surface_point
+                local_part=target[np.linalg.norm(target-anchor,axis=1)<.04]
+                if len(local_part):
+                    target_part=np.vstack([target_part,local_part])
+                    _,part_unique=np.unique(np.round(target_part/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                    target_part=target_part[part_unique]
+                map_.set_target(target_part)
+                np.savez_compressed(out/f"candidates_{obs.frame_id:03d}.npz",positions=np.array([g.position for g in candidates]),
+                    rotations=np.array([g.rotation for g in candidates]),widths=np.array([g.width for g in candidates]),
+                    ray_angles=np.array([g.ray_angle for g in candidates]),target=target,
+                    surface_points=np.array([g.surface_point for g in candidates]),grasp_centers=np.array([g.grasp_center for g in candidates]),
+                    grasp_center_offset=robot.grasp_center_offset())
+                planning_rng_state=copy.deepcopy(planner.rng.bit_generator.state)
+                chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,time_budget=config.planning_seconds)
+                (out/f'planning_diagnostic_{obs.frame_id:03d}.json').write_text(json.dumps({
+                    'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
+                    'closest_by_failure':planner.closest_by_failure,
+                    'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
+                feedback=planner.last_failure if chosen is None else "planned"
+            except ValueError as exc:
+                chosen=None; feedback="grounding: "+str(exc)
+            record.planning_seconds+=time.monotonic()-timer
+            event("planning",feedback=feedback,checks=planner.checks)
+            history.append({"view":obs.view,"feedback":feedback})
+            if chosen is None:
+                record.failure="planning: "+feedback
+                if record.observations>=config.max_observations-1: break
+                recovery=None
+                recovery_points=planner.recovery_unknown()
+                if not len(recovery_points): recovery_points=planner.best_unknown
+                if (recovery_points is None or not len(recovery_points)) and planner.closest_invalid is not None and planner.closest_invalid.get('unknown'):
+                    recovery_points=np.asarray(planner.closest_invalid['points'])
+                if recovery_points is not None and len(recovery_points):
+                    # Closing moves both the gripper and the target. A single
+                    # orbit view cannot in general expose the whole arm corridor
+                    # and the leading payload shell (the block run left two arm
+                    # and 34 payload voxels unseen). Reserve two mapping frames
+                    # for every grasp task instead of weakening unknown-space
+                    # collision checks for geometrically simpler objects.
+                    reserve_after_close=3 if task=='mug' else 2
+                    recovery_budget=max(1,config.max_observations-record.observations-reserve_after_close)
+                    recovery=suggest_views(robot,obs,recovery_points,budget=recovery_budget,
+                        focus_points=target_part,observed_points=map_.surface)
+                    history.append({'coverage_advice':recovery,'feedback':
+                        'Targeted recovery advice for the specific robot points that remained unknown.'})
+                    event('recovery_view_advice',**recovery)
+                elif 'target interference' in feedback:
+                    history.append({'feedback':
+                        'The non-contact finger structure would hit the target. Reobserve the mug handle and ground the midpoint of the outermost vertical bar, away from the rim and both junctions.'})
+                if strategy!="active":
+                    sim.move_camera(*tabletop_view(strategy,initial_view,rng))
+                # Active VLM chooses the next move from the same image and failure feedback.
+                if strategy=="active":
+                    steps=1 if recovery is None else min(len(recovery.get('views',[])),
+                        config.max_observations-record.observations-1)
+                    recovered=False
+                    for recovery_index in range(steps):
+                        # Unknown-space recovery is mapping-only. A grasp from a
+                        # different recovery frame would silently replace the
+                        # frozen approach ray and make the representation rule
+                        # test-dependent. Geometric/contact failures without
+                        # recovery points may still request a corrected ground.
+                        next_decision=vlm.decide(obs,INSTRUCTIONS[task],history,
+                            force_observe=recovery is not None)
+                        event("recovery_decision",recovery_index=recovery_index+1,**next_decision.model_dump())
+                        if recovery is None and next_decision.action=='grasp' and grounding_repairs.get(obs.frame_id,0)<2:
+                            grounding_repairs[obs.frame_id]=grounding_repairs.get(obs.frame_id,0)+1
+                            pending_decision=next_decision
+                            break
+                        if next_decision.action!="observe": break
+                        sim.move_camera(next_decision.azimuth,next_decision.elevation,next_decision.distance)
+                        history.append({'view':obs.view,'decision':next_decision.model_dump(),
+                            'feedback':'completed one mapping-only recovery observation; choose an unvisited remaining coverage view'})
+                        obs=observe();recovered=True
+                        newly_seen=resolver.track(obs,target,robot_depths.get(obs.frame_id)) if 'target' in locals() else None
+                        if newly_seen is not None:
+                            combined=np.vstack([target,newly_seen])
+                            _,unique=np.unique(np.round(combined/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                            target=combined[unique]
+                    if pending_decision is not None:continue
+                    if not recovered: break
+                    if recovery is None:
+                        # A geometric/contact failure needs a new current-frame
+                        # grounding and therefore returns through the VLM loop.
+                        continue
+                    # The scene has not moved. Preserve the VLM-selected point,
+                    # camera ray and candidates; the extra view exists to reveal
+                    # planning space, not silently change the grasp direction.
+                    retry_timer=time.monotonic()
+                    # Reuse the exact redundant-IK and RRT samples whose rejected
+                    # workspace points produced the recovery advice. Otherwise a
+                    # fresh random elbow branch creates new unseen space.
+                    planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
+                    chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
+                        time_budget=config.planning_seconds)
+                    record.planning_seconds+=time.monotonic()-retry_timer
+                    retry_feedback=planner.last_failure if chosen is None else "planned"
+                    (out/f'planning_diagnostic_{obs.frame_id:03d}_recovery.json').write_text(json.dumps({
+                        'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
+                        'closest_by_failure':planner.closest_by_failure,
+                        'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
+                    event("recovery_planning",feedback=retry_feedback,checks=planner.checks,
+                        preserved_grounding_frame=decision.frame_id)
+                    if chosen is None:
+                        record.failure="planning: "+retry_feedback
+                        remaining_unknown=planner.recovery_unknown()
+                        followup=None
+                        if len(remaining_unknown) and record.observations<config.max_observations-1:
+                            followup=suggest_views(robot,obs,remaining_unknown,
+                                budget=min(2,config.max_observations-record.observations-1),
+                                focus_points=target_part,observed_points=map_.surface)
+                            event('retry_recovery_view_advice',**followup)
+                        history.append({'feedback':record.failure,
+                            'coverage_advice':followup,
+                            'remaining_unknown_points':len(remaining_unknown),
+                            'next_step':'Observation budget remains. If coverage advice has a view, observe it to certify the exact residual path points; otherwise re-ground away from non-finger target interference. Do not reuse a failed grasp blindly.'})
+                        # Keep this as one recovery transaction. The new frame
+                        # updates geometry only; retry the stored image ray and
+                        # candidates instead of silently changing the grasp by
+                        # re-grounding from the recovery camera.
+                        if followup and followup.get('views') and strategy=='active':
+                            residual=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True)
+                            event('retry_recovery_decision',**residual.model_dump())
+                            if residual.action=='observe':
+                                sim.move_camera(residual.azimuth,residual.elevation,residual.distance)
+                                history.append({'view':obs.view,'decision':residual.model_dump(),
+                                    'feedback':'completed residual mapping observation; preserving the original grasp ray'})
+                                obs=observe()
+                                newly_seen=resolver.track(obs,target,robot_depths.get(obs.frame_id))
+                                if newly_seen is not None:
+                                    combined=np.vstack([target,newly_seen])
+                                    _,unique=np.unique(np.round(combined/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                                    target=combined[unique]
+                                residual_timer=time.monotonic()
+                                planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
+                                chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
+                                    time_budget=config.planning_seconds)
+                                record.planning_seconds+=time.monotonic()-residual_timer
+                                residual_feedback=planner.last_failure if chosen is None else 'planned'
+                                event('retry_recovery_planning',feedback=residual_feedback,checks=planner.checks,
+                                    preserved_grounding_frame=decision.frame_id)
+                                if chosen is not None:record.failure=''
+                        if chosen is not None:
+                            pass
+                        elif record.observations<config.max_observations-1:continue
+                        else:break
+                    record.failure=""
+                else:
+                    obs=observe(); continue
+            grasp,transit,approach=chosen
+            record.attempts+=1
+            record.failure="";sim.episode_attempt=record.attempts
+            execute(transit,-1,"pregrasp"); execute(approach,-1,"approach")
+            sim.phase="close"
+            for _ in range(25): sim.step(approach[-1],1)
+            planner.gripper=sim.gripper_q
+            p,R=robot.pose(sim.q)
+            preclose_target=target.copy()
+            map_.certify_robot_state(robot.points(sim.q,sim.gripper_q)[0],
+                robot.volumes(sim.q,sim.gripper_q))
+            # The target has moved with the closing fingers. Remove its old
+            # observed endpoints before probing the lift corridor; static scene
+            # endpoints remain.  Run the *actual* IK / interpolated robot check
+            # once so active view selection receives the precise rejected
+            # samples, rather than only a nominal Cartesian sweep estimate.
+            map_.remove_target_endpoints(preclose_target)
+            planner.attached=None;planner.gripper=sim.gripper_q
+            preview_p,preview_R=robot.pose(sim.q);preview_q=sim.q.copy()
+            preview_path=[preview_q];preview_ik=True
+            for dz in np.linspace(.01,.13,14):
+                preview=robot.ik(preview_p+[0,0,dz],preview_R,preview_q)
+                if preview is None:
+                    preview_ik=False;break
+                preview_q=preview;preview_path.append(preview)
+            # Sample the same 0.025 rad interpolation resolution used by the
+            # execution checker.  Looking only at Cartesian waypoints misses
+            # thin visibility gaps traversed between two valid IK solutions.
+            def classify_preview_sweep():
+                unseen_sets=[]
+                for a,b in zip(preview_path[:-1],preview_path[1:]):
+                    n=max(2,int(np.ceil(np.max(np.abs(b-a))/.025))+1)
+                    for sample_q in np.linspace(a,b,n):
+                        sample_points=robot.points(sample_q,sim.gripper_q)[0]
+                        unseen=sample_points[map_.classify(sample_points)==0]
+                        if len(unseen):unseen_sets.append(unseen)
+                if not unseen_sets:return np.empty((0,3))
+                points=np.vstack(unseen_sets)
+                _,unique=np.unique(np.round(points/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                return points[unique]
+            preview_unknown=classify_preview_sweep()
+            preview_ok=preview_ik and not len(preview_unknown)
+            event('postgrasp_lift_preview',feasible=preview_ok,
+                feedback='planned' if preview_ok else ('IK' if not preview_ik else 'unknown space'),
+                rejected_unknown_points=len(preview_unknown))
+            robot.set_q(sim.q,sim.gripper_q)
+            # Closing can move the object before lift. A holed mug may use one
+            # additional frame; solid-object tasks remain capped at two. The independent evaluator still
+            # verifies success if the observation budget is fully consumed.
+            post_index=0
+            post_limit=config.max_observations
+            max_post_views=3 if task=='mug' else 2
+            while record.observations<post_limit and post_index<max_post_views:
+                sweep=np.vstack([target+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
+                sweep_unknown=sweep[map_.classify(sweep)==0]
+                leading=leading_shell(sweep_unknown,map_.resolution)
+                # Weight the leading boundary: it enters new space first. The
+                # rest of the sweep remains represented once, but cannot drown
+                # out the thin top shell in a tall handled object.
+                advice_points=np.vstack([sweep_unknown,np.repeat(leading,4,axis=0)]) if len(leading) else sweep_unknown
+                # Also predict the arm's vertical-lift sweep using only known
+                # kinematics. Payload-only view selection can leave a wrist or
+                # elbow surface just behind the currently observed robot.
+                lift_robot=[];preview_q=sim.q.copy()
+                for dz in np.linspace(.01,.13,14):
+                    preview=robot.ik(p+[0,0,dz],R,preview_q)
+                    if preview is None:break
+                    lift_robot.append(robot.points(preview,sim.gripper_q)[0]);preview_q=preview
+                if lift_robot:
+                    robot_sweep=np.vstack(lift_robot)
+                    robot_unknown=robot_sweep[map_.classify(robot_sweep)==0]
+                    if len(robot_unknown):
+                        _,robot_unique=np.unique(np.round(robot_unknown/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                        robot_unknown=robot_unknown[robot_unique]
+                else:robot_unknown=np.empty((0,3))
+                if post_index and not len(sweep_unknown) and not len(robot_unknown):break
+                current_obs=replace(obs,q=sim.q.copy(),gripper_q=sim.gripper_q.copy())
+                # Whole-arm safety is a hard priority: a high payload point
+                # count must not sacrifice even one unseen wrist sample. Use
+                # payload leading surfaces and target visibility only to break
+                # ties among views that cover the robot sweep.
+                # The exact samples rejected by the interpolated IK path take
+                # precedence on the first post-grasp view.  Later iterations
+                # fall back to the recomputed kinematic sweep after the map has
+                # changed.
+                exact_unknown=preview_unknown
+                required_points=exact_unknown if len(exact_unknown) else robot_unknown
+                # First satisfy every coverable whole-arm sample; then rank
+                # those views by the carried object's leading lift sweep. This
+                # avoids spending the only post-close frame on the arm while
+                # leaving the payload's millimetre-scale upper shadow unknown.
+                coverage_points=advice_points if len(advice_points) else required_points
+                focus=np.vstack([target,leading]) if len(leading) else target
+                # When any robot sweep point is unseen, do not let attractive
+                # target framing break visibility ties.  The target is already
+                # localized; this view exists first and foremost to certify the
+                # arm corridor. Payload focus is used only once the arm is fully
+                # observed.
+                focus_for_advice=None if len(required_points) else focus
+                payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
+                    focus_points=focus_for_advice,observed_points=map_.surface,
+                    required_points=required_points if len(required_points) else None)
+                history.append({'coverage_advice':payload_advice,'feedback':
+                    'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})
+                event('postgrasp_view_advice',**payload_advice)
+                if strategy == 'active':
+                    post=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True)
+                    event('postgrasp_decision',**post.model_dump())
+                    selected=(post.azimuth,post.elevation,post.distance)
+                else:
+                    selected=None
+                selected=tabletop_view(strategy,initial_view,rng,selected)
+                sim.move_camera(*selected)
+                history.append({'view':obs.view,'selected_view':selected,
+                    'feedback':'completed one post-grasp mapping observation'})
+                obs=observe()
+                current_target=resolver.track(obs,target,robot_depths.get(obs.frame_id),support_z=map_.table_z)
+                if current_target is not None and len(current_target)>=20:
+                    # Different views expose different surfaces: a median shift
+                    # is not object motion. Reassociate the contact neighborhood
+                    # directly in the shared calibrated world frame.
+                    center=grasp.grasp_center
+                    current_part=current_target[np.linalg.norm(current_target-center,axis=1)<.04]
+                    if len(current_part):target_part=current_part
+                    # The first post-close RGB-D cloud supersedes the stale
+                    # pre-close payload. Subsequent views are already calibrated
+                    # in the same world frame and are fused without a second
+                    # viewpoint-biased median translation.
+                    target=current_target if post_index==0 else np.vstack([target,current_target])
+                    _,target_unique=np.unique(np.round(target/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                    target=target[target_unique]
+                    map_.set_target(target_part)
+                # Reassociate local target surfaces in recorded depth frames.
+                # Only observed surfaces associated by RGB-D/SAM are removed.
+                removed_sets=[]
+                for prior_obs in map_.views:
+                    seen=resolver.track(prior_obs,target,robot_depths.get(prior_obs.frame_id),support_z=map_.table_z)
+                    if seen is not None:removed_sets.append(seen)
+                if removed_sets:
+                    stale=np.vstack(removed_sets)
+                    map_.remove_target_endpoints(stale)
+                    event('postgrasp_perception',associated_surface_points=len(stale),
+                        current_payload_points=len(target),leading_unknown_points=len(leading),
+                        robot_lift_unknown_points=len(robot_unknown))
+                # Close the loop: score a second view from what remains unknown
+                # after the first *actual* RGB-D integration.
+                preview_unknown=classify_preview_sweep()
+                event('postgrasp_residual',rejected_unknown_points=len(preview_unknown),
+                    postgrasp_view_index=post_index+1)
+                post_index+=1
+            p,R=robot.pose(sim.q)
+            planner.attached=(target-p)@R
+            np.save(out/'payload_source_points.npy',target)
+            np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
+            map_.set_payload_source(target)
+            map_.remove_target_endpoints(target)
+            planner.begin_payload_lift()
+            # Build a lift path from robot proprioception and observed grasp geometry.
+            lift=[sim.q];lift_timer=time.monotonic()
+            planner.allow_payload_support=True
+            try:
+                for dz in np.linspace(.01,.13,14):
+                    q=planner.feasible_ik(p+[0,0,dz],R,lift[-1],contact=True,connected=True)
+                    if q is None:
+                        (out/'lift_planning_diagnostic.json').write_text(json.dumps({
+                            'failure':planner.last_failure,'payload_invalid':planner.payload_invalid,
+                            'closest_by_failure':planner.closest_by_failure},indent=2))
+                        raise RuntimeError("planning: lift "+planner.last_failure)
+                    lift.append(q)
+            finally:
+                planner.allow_payload_support=False;planner.end_payload_lift()
+            record.planning_seconds+=time.monotonic()-lift_timer
+            execute(np.array(lift),1,"lift")
+            sim.phase="hold"
+            for _ in range(45): sim.step(lift[-1],1)
+            if record.observations<config.max_observations:
+                obs=observe()
+                tracked=resolver.track(obs,target+[0,0,.13],robot_depths.get(obs.frame_id),support_z=map_.table_z)
+                lifted=tracked is not None and float(np.median(tracked[:,2]))>float(np.median(target[:,2]))+.07 and abs(sim.gripper_q[0]-sim.gripper_q[1])>.006
+                event("visual_verification",lifted=bool(lifted))
+            else:
+                # The observation budget may be spent resolving the strict
+                # carried-object / whole-arm sweep. Do not feed privileged task
+                # truth back to the agent; the independent evaluator scores the
+                # completed 2 s hold after the episode.
+                tracked=None;lifted=abs(sim.gripper_q[0]-sim.gripper_q[1])>.006
+                event("verification_deferred_to_independent_evaluator")
+            if lifted and record.attempts==1: record.first_grasp_success=True
+            if not lifted:
+                record.failure="execution: visual lift verification failed"
+                history.append({"feedback":record.failure})
+                # Release only after a planned return to the grasp height.
+                execute(np.asarray(lift)[::-1],1,"lower")
+                sim.phase="release"
+                for _ in range(20): sim.step(sim.q,-1)
+                planner.attached=None; planner.gripper=None; map_.clear_dynamic()
+                if record.observations<config.max_observations-1: obs=observe(); continue
+                break
+            # The world is static except for the grasped target. Remove its old
+            # endpoints, then exclude the observed held target from the obstacle map.
+            map_.remove_target_endpoints(target)
+            if tracked is not None:
+                map_.remove_target_endpoints(tracked);map_.set_target(tracked)
+            held_p,held_R=robot.pose(sim.q)
+            held_estimate=planner.attached@held_R.T+held_p
+            map_.remove_target_endpoints(held_estimate)
+            map_.set_payload_source(held_estimate)
+            if task!="occluded": break
+            if decision.place_point is None: raise RuntimeError("grounding: missing destination")
+            # place_point refers to the pre-motion frame; recover that calibrated observation.
+            old=np.load(out/"observations"/f"frame_{decision.frame_id:03d}.npz")
+            h,w=obs.depth.shape
+            uv=np.rint(np.array(decision.place_point)*[w-1,h-1]).astype(int)
+            destination=unproject(uv,old["depth"][uv[1],uv[0]],old["K"],old["T_wc"])
+            current_p,current_R=robot.pose(sim.q)
+            destination[2]=current_p[2]
+            transfer_timer=time.monotonic()
+            goal=robot.ik(destination,current_R,sim.q)
+            transfer=None if goal is None else planner.plan(sim.q,goal)
+            if transfer is None: raise RuntimeError("planning: transfer "+planner.last_failure)
+            record.planning_seconds+=time.monotonic()-transfer_timer
+            execute(transfer,1,"transfer")
+            # Height from observed target bottom and support surface, not object metadata.
+            bottom_offset=float(np.min(planner.attached@current_R.T,axis=0)[2])
+            final_z=map_.table_z-bottom_offset+.008
+            lower=[sim.q];lower_timer=time.monotonic()
+            planner.allow_payload_support=True
+            for z in np.linspace(destination[2],final_z,20)[1:]:
+                q=robot.ik(np.r_[destination[:2],z],current_R,lower[-1])
+                if q is None or not planner.edge(lower[-1],q,contact=True): raise RuntimeError("planning: lower "+planner.last_failure)
+                lower.append(q)
+            planner.allow_payload_support=False
+            record.planning_seconds+=time.monotonic()-lower_timer
+            execute(np.array(lower),1,"lower")
+            sim.phase="release"
+            for _ in range(60): sim.step(lower[-1],-1)
+            break
+        if not record.failure and not record.attempts: record.failure="observation budget exhausted"
+    except KeyboardInterrupt:
+        record.failure="interrupted during development"
+        event("interrupted")
+        raise
+    except Exception as exc:
+        record.failure=str(exc)
+        (out/"error.txt").write_text(traceback.format_exc())
+        event("error",message=str(exc))
+    finally:
+        if vlm:
+            record.vlm_calls=vlm.calls; record.inference_seconds=vlm.seconds; vlm.client.close()
+        if 'resolver' in locals():
+            record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds
+        record.elapsed_seconds=time.monotonic()-start
+        if sim:
+            if sim.evaluator:
+                score=sim.evaluator.result()
+                record.success=score["success"]; record.collision=score["collision"]
+                record.first_grasp_success=score["first_grasp_success"]
+                record.collision_free_success=score['collision_free_success']
+                (out/"evaluation_truth.json").write_text(json.dumps(score,indent=2))
+            if record.success: record.failure=""
+            elif not record.failure: record.failure="execution: evaluator success criterion not met"
+            save_episode(out,sim,record,events)
+            if 'robot' in locals(): robot.close()
+            sim.close()
+        else: (out/"result.json").write_text(json.dumps(asdict(record),indent=2))
+    return asdict(record)
