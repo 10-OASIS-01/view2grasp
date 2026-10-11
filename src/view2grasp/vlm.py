@@ -156,6 +156,10 @@ calibrated crop, ALL coordinates refer to that crop's image_size; never reuse ol
 full-frame coordinates. The crop location is only a projection hypothesis from
 previous measurements, not proof that the target is visible there. Mark only
 visible requested material and omit regions when you cannot identify it.
+grounding_refinement_context instead requests a fresh grasp or abort in a crop
+of this already acquired frame, BEFORE a grasp ray is formed. Use crop-normalized
+coordinates and fresh explicit object and grasp_part regions. It is not an
+observe annotation or mapping-only transaction; no camera motion is requested.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
 
@@ -227,7 +231,7 @@ class VLM:
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
                observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None,
-               current_frame_reselection=None):
+               current_frame_reselection=None,grounding_refinement=None):
         if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
             raise ValueError('unsupported observation purpose')
         if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
@@ -235,8 +239,20 @@ class VLM:
         if current_frame_reselection is not None and (not isinstance(current_frame_reselection,dict)
                 or force_observe or force_grasp or obs.base_pose is not None or observe_purpose!='mapping_only'):
             raise ValueError('current-frame reselection requires an unforced tabletop decision and evidence dictionary')
-        if derived_image_context is not None and observe_purpose!='annotation':
-            raise ValueError('derived images are supported only for current-frame annotation')
+        if grounding_refinement is not None:
+            if (not isinstance(grounding_refinement,dict) or not force_grasp or force_observe
+                    or obs.base_pose is not None or observe_purpose!='mapping_only'
+                    or current_frame_reselection is not None or annotation_diagnostic is not None):
+                raise ValueError('grounding refinement requires an exclusive forced tabletop grasp and crop provenance dictionary')
+            if (not isinstance(derived_image_context,dict) or grounding_refinement!=derived_image_context
+                    or grounding_refinement.get('source_frame_id')!=obs.frame_id
+                    or grounding_refinement.get('source_camera_id')!=obs.camera_id
+                    or grounding_refinement.get('crop_shape_hw')!=list(obs.depth.shape)
+                    or tuple(obs.rgb.shape[:2])!=tuple(obs.depth.shape)
+                    or grounding_refinement.get('new_observation') is not False):
+                raise ValueError('grounding refinement requires matching current source frame, camera, image shape and derived crop provenance')
+        if derived_image_context is not None and observe_purpose!='annotation' and grounding_refinement is None:
+            raise ValueError('derived images are supported only for current-frame annotation or grounding refinement')
         if annotation_diagnostic is not None:
             if observe_purpose!='annotation':
                 raise ValueError('pixel diagnostics are supported only for current-frame annotation')
@@ -266,6 +282,28 @@ class VLM:
             user['derived_image_context']=copy.deepcopy(derived_image_context)
         if diagnostic_metadata is not None:
             user['annotation_diagnostic']=diagnostic_metadata
+        if grounding_refinement is not None:
+            user['allowed_actions']=['grasp','abort']
+            user['response_contract']+=(' This is a before-ray grounding refinement. Return grasp with fresh explicit '
+                'object AND grasp_part regions, or abort. Every coordinate is normalized to this supplied crop image_size, '
+                'not the original full image. Do not return observe or a camera command.')
+            user['grounding_refinement_context']={
+                'purpose':'before_ray_same_frame_grasp_refinement','frame_id':obs.frame_id,
+                'camera_id':obs.camera_id,'acquires_new_observation':False,
+                'derived_image_context':copy.deepcopy(grounding_refinement),
+                'instructions':'This crop contains pixels from the CURRENT already-acquired image. '
+                    'No grasp ray has been accepted from the earlier coarse proposal. Reinspect this crop and return '
+                    'a fresh grasp with explicit object AND grasp_part box, polygon or mask regions, or abort if uncertain. '
+                    'The object must cover the visible complete object material, including the mug body and handle; '
+                    'the permitted grasp_part must isolate the straight outer vertical handle bar around its midpoint, '
+                    'excluding both junctions. Inspect both ends of the visible straight bar before choosing its middle; '
+                    'do not copy an upper-only patch or earlier pixel coordinates. Prefer regions without an optional contact click. '
+                    'If the requested part or its extent cannot be identified inside this crop, abort. '
+                    'ALL output coordinates use this crop image_size and its normalized pixel centers. The source frame/camera '
+                    'IDs stay unchanged. The caller will restore coordinates to the full acquired image and run ordinary '
+                    'depth, grounding, ray, IK and collision checks. Cropping grants no visibility, contact or safety evidence. '
+                    'Ignore older mapping-only preserve-ray instructions: this is before-ray semantic refinement, '
+                    'not an observe annotation and not a request for another image.'}
         if current_frame_reselection is not None:
             user['current_frame_reselection_context']={
                 'purpose':'fresh_grounding_on_acquired_frame','frame_id':obs.frame_id,
@@ -396,6 +434,10 @@ class VLM:
                     roles={g.role for g in decision.groundings if g.kind!='candidate'}
                     if not {'object','grasp_part'}<=roles:
                         raise ValueError('current-frame reselection requires fresh explicit object AND grasp_part groundings; old points or candidate IDs are insufficient')
+                if grounding_refinement is not None and decision.action=='grasp':
+                    roles={g.role for g in decision.groundings if g.kind in ('box','polygon','mask')}
+                    if not {'object','grasp_part'}<=roles:
+                        raise ValueError('grounding refinement requires fresh explicit object AND grasp_part regions; legacy points or candidate IDs are insufficient')
                 if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
                 if force_observe and decision.action != "observe":
                     purpose=observe_purpose.replace('_',' ')

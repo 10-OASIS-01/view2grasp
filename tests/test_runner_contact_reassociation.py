@@ -101,6 +101,8 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             evidence.remaining_obstacles.append(self.surface.copy())
 
     class Plan:
+        add_observed_payload=runner.Planner.add_observed_payload
+        payload_collision_local=runner.Planner.payload_collision_local
         def __init__(self,robot,map_,rng):
             self.rng=rng;self.calls=0;self.checks=0;self.last_failure='unknown space'
             self.failure_counts={};self.closest_invalid=None;self.closest_by_failure={}

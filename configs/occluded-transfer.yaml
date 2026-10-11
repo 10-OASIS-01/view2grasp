@@ -1,0 +1,12 @@
+# Development-only occluded pick/place: six pre-close frames, two post-close
+# mapping frames, and two reserved post-lift frames. The first verifies the
+# held object; the last may observe an actual rejected transfer UNKNOWN region.
+# This is real 1024 RGB-D sampling. Geometry and collision thresholds are unchanged.
+max_observations: 10
+post_lift_observations: 2
+max_attempts: 2
+image_size: 1024
+voxel_resolution_m: 0.005
+planning_seconds: 120
+max_candidates: 48
+validation_seeds: [3, 4, 5]

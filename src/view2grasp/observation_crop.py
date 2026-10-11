@@ -22,6 +22,7 @@ class ObservationCrop:
     context_pixels: int
     min_size: int
     reference_point_count: int
+    reference_kind: str = 'observed_world_points'
 
     def provenance(self):
         """JSON-safe metadata; all bounds use NumPy's half-open convention."""
@@ -39,7 +40,10 @@ class ObservationCrop:
             'context_pixels': self.context_pixels,
             'min_size_pixels': self.min_size,
             'reference_point_count': self.reference_point_count,
-            'reference_use': 'projection_only_not_current_visibility_or_contact_evidence',
+            'reference_kind': self.reference_kind,
+            'reference_use': ('proposal_extent_only_not_current_visibility_or_contact_evidence'
+                if self.reference_kind=='current_vlm_object_pixel_region' else
+                'projection_only_not_current_visibility_or_contact_evidence'),
             'new_observation': False,
             'resized': False,
         }
@@ -70,11 +74,24 @@ class ObservationCrop:
         execute the reply's camera command. Wrong frame/camera replies remain
         invalid; candidate IDs have no transformable pixel representation.
         """
+        if decision.action != 'observe':
+            raise ValueError('crop restoration only accepts observe annotations')
+        return self._restore_decision(decision)
+
+    def restore_grasp_decision(self, decision: AgentDecision) -> AgentDecision:
+        """Restore an explicit fresh grasp refinement, never an annotation action."""
+        if decision.action not in ('grasp','abort'):
+            raise ValueError('grasp refinement restoration only accepts grasp or abort')
+        if decision.action=='grasp':
+            roles={g.role for g in decision.groundings if g.source=='vlm' and g.kind in ('box','polygon','mask')}
+            if not {'object','grasp_part'}<=roles:
+                raise ValueError('grasp refinement requires fresh explicit object and grasp_part')
+        return self._restore_decision(decision)
+
+    def _restore_decision(self, decision):
         obs = self.observation
         if decision.frame_id != obs.frame_id or decision.camera_id != obs.camera_id:
             raise ValueError('crop annotation requires its source frame and camera')
-        if decision.action != 'observe':
-            raise ValueError('crop restoration only accepts observe annotations')
         data = decision.model_dump()
 
         def restore(points):
@@ -122,6 +139,63 @@ def _axis_bounds(low, high, extent, min_size):
     return start, start + size
 
 
+def _validate_source(obs,robot_depth):
+    if obs.depth.ndim != 2 or min(obs.depth.shape) < 2 or obs.rgb.shape != (*obs.depth.shape, 3):
+        raise ValueError('crop requires aligned RGB and depth images of at least two pixels')
+    K,T=np.asarray(obs.K),np.asarray(obs.T_wc)
+    if (K.shape!=(3,3) or T.shape!=(4,4) or not np.isfinite(K).all()
+            or not np.isfinite(T).all() or K[0,0]<=0 or K[1,1]<=0
+            or not np.allclose(K[2],[0,0,1]) or not np.allclose(T[3],[0,0,0,1])
+            or not np.allclose(T[:3,:3].T@T[:3,:3],np.eye(3),atol=1e-6)
+            or not np.isclose(np.linalg.det(T[:3,:3]),1,atol=1e-6)):
+        raise ValueError('crop requires finite calibrated camera matrices')
+    if robot_depth is not None and np.asarray(robot_depth).shape!=obs.depth.shape:
+        raise ValueError('robot depth must match the source observation shape')
+
+
+def _make_crop(obs,bounds,robot_depth,surface_margin_m,context_pixels,min_size,reference_count,
+               reference_kind='observed_world_points'):
+    x0,y0,x1,y1=bounds
+    K=np.asarray(obs.K,dtype=float).copy();K[0,2]-=x0;K[1,2]-=y0
+    cropped=replace(obs,rgb=obs.rgb[y0:y1,x0:x1].copy(),depth=obs.depth[y0:y1,x0:x1].copy(),K=K)
+    own=None if robot_depth is None else np.asarray(robot_depth)[y0:y1,x0:x1].copy()
+    return ObservationCrop(cropped,bounds,tuple(obs.depth.shape),own,float(surface_margin_m),
+        int(context_pixels),int(min_size),int(reference_count),reference_kind)
+
+
+def crop_grasp_proposal(obs: Observation,decision: AgentDecision,*,robot_depth=None,
+                        context_pixels=16,min_size=128) -> ObservationCrop:
+    """Reinspect a current object proposal before deriving contact or a ray.
+
+    Bounds come from the proposal, not its resolved contact-connected component:
+    a coarse aperture hole must not make the crop lose the cup body or outer bar.
+    Measured depth only checks that the region contains a non-robot return; it
+    does not identify the object, filter/repair the proposal, or grant contact.
+    """
+    from .grounding import proposal_mask
+    _validate_source(obs,robot_depth)
+    if decision.action!='grasp' or decision.frame_id!=obs.frame_id or decision.camera_id!=obs.camera_id:
+        raise ValueError('grasp crop requires a current-frame grasp proposal')
+    if isinstance(context_pixels,bool) or not isinstance(context_pixels,(int,np.integer)) or context_pixels<0:
+        raise ValueError('crop pixel context must be a nonnegative integer')
+    if isinstance(min_size,bool) or not isinstance(min_size,(int,np.integer)) or min_size<2:
+        raise ValueError('crop minimum size must be an integer of at least two pixels')
+    proposals=[g for g in decision.groundings if g.role=='object' and g.source=='vlm'
+        and g.kind in ('box','polygon','mask')]
+    if len(proposals)!=1:raise ValueError('grasp crop requires one explicit current object region')
+    mask=proposal_mask(proposals[0],obs)
+    measured=mask&np.isfinite(obs.depth)&(obs.depth>.01)
+    if robot_depth is not None:
+        own=np.asarray(robot_depth)
+        measured&=~np.isfinite(own)|(obs.depth<own-.003)
+    if not measured.any():raise ValueError('object region has no measured non-robot depth for refinement')
+    v,u=np.where(mask);h,w=obs.depth.shape
+    x0,x1=_axis_bounds(u.min()-context_pixels,u.max()+context_pixels,w,min_size)
+    y0,y1=_axis_bounds(v.min()-context_pixels,v.max()+context_pixels,h,min_size)
+    return _make_crop(obs,(x0,y0,x1,y1),robot_depth,0.,context_pixels,min_size,
+        measured.sum(),'current_vlm_object_pixel_region')
+
+
 def crop_observation(obs: Observation, reference_points, *, surface_margin_m=.035,
                      context_pixels=16, min_size=128, robot_depth=None) -> ObservationCrop:
     """Crop a current frame around projected, previously observed target points.
@@ -141,18 +215,8 @@ def crop_observation(obs: Observation, reference_points, *, surface_margin_m=.03
         raise ValueError('crop pixel context must be a nonnegative integer')
     if isinstance(min_size, bool) or not isinstance(min_size, (int, np.integer)) or min_size < 2:
         raise ValueError('crop minimum size must be an integer of at least two pixels')
-    if obs.depth.ndim != 2 or min(obs.depth.shape) < 2 or obs.rgb.shape != (*obs.depth.shape, 3):
-        raise ValueError('crop requires aligned RGB and depth images of at least two pixels')
+    _validate_source(obs,robot_depth)
     K, T = np.asarray(obs.K), np.asarray(obs.T_wc)
-    if (K.shape != (3, 3) or T.shape != (4, 4) or not np.isfinite(K).all()
-            or not np.isfinite(T).all() or K[0, 0] <= 0 or K[1, 1] <= 0
-            or not np.allclose(K[2], [0, 0, 1])
-            or not np.allclose(T[3], [0, 0, 0, 1])
-            or not np.allclose(T[:3, :3].T @ T[:3, :3], np.eye(3), atol=1e-6)
-            or not np.isclose(np.linalg.det(T[:3, :3]), 1, atol=1e-6)):
-        raise ValueError('crop requires finite calibrated camera matrices')
-    if robot_depth is not None and np.asarray(robot_depth).shape != obs.depth.shape:
-        raise ValueError('robot depth must match the source observation shape')
     lo, hi = points.min(axis=0) - surface_margin_m, points.max(axis=0) + surface_margin_m
     envelope = np.array(list(product(*zip(lo, hi))))
     uv, z = project(envelope, K, T)
@@ -166,11 +230,4 @@ def crop_observation(obs: Observation, reference_points, *, surface_margin_m=.03
     low, high = projected_low - context_pixels, projected_high + context_pixels
     x0, x1 = _axis_bounds(low[0], high[0], w, int(min_size))
     y0, y1 = _axis_bounds(low[1], high[1], h, int(min_size))
-    cropped_K = K.astype(float).copy()
-    cropped_K[0, 2] -= x0
-    cropped_K[1, 2] -= y0
-    cropped = replace(obs, rgb=obs.rgb[y0:y1, x0:x1].copy(),
-        depth=obs.depth[y0:y1, x0:x1].copy(), K=cropped_K)
-    cropped_robot = None if robot_depth is None else np.asarray(robot_depth)[y0:y1, x0:x1].copy()
-    return ObservationCrop(cropped, (x0, y0, x1, y1), (h, w), cropped_robot,
-        float(surface_margin_m), int(context_pixels), int(min_size), len(points))
+    return _make_crop(obs,(x0,y0,x1,y1),robot_depth,surface_margin_m,context_pixels,min_size,len(points))

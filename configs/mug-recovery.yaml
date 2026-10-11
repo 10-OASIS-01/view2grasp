@@ -3,3 +3,6 @@
 # Restore the ordinary 120 s planning allowance for the new approach/transit.
 max_observations: 10
 planning_seconds: 120
+# Refine the first coarse semantic grasp in an unresized crop of the same RGB-D.
+# This adds a model call, not a new observation or an automatic contact label.
+refine_grasp_grounding: true

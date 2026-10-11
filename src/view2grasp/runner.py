@@ -15,11 +15,12 @@ from .config import ExperimentConfig,fingerprint
 from .view_advisor import nominal_grasp,swept_unknown,suggest_views
 from .reachability_advisor import suggest_reachable_views
 from .observation_policy import tabletop_view
-from .observation_crop import crop_observation
+from .observation_crop import crop_observation,crop_grasp_proposal
 from .grounding import ContactAssociationError,GroundingResolver,track_surface
 from .grasp_semantics import check_vertical_part_midpoint
 from .annotation_diagnostic import build_annotation_diagnostic
 from .placement import tabletop_placement
+from .transfer_recovery import plan_transfer_attempt,tabletop_observation_budget
 
 
 def leading_shell(points,resolution=.005):
@@ -80,8 +81,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
     record=EpisodeRecord(task,seed,strategy,online=replay is None)
     # Every pre-close branch shares this limit, including residual recovery and
     # retries. Keep at least the initial observation for small smoke-test budgets.
-    reserve_after_close=min(3 if task=='mug' else 2,config.max_observations-1)
-    pregrasp_limit=config.max_observations-reserve_after_close
+    phase_budget=tabletop_observation_budget(task,config.max_observations,config.post_lift_observations)
+    reserve_after_close=phase_budget.postclose_observations
+    pregrasp_limit=phase_budget.pregrasp_limit
     events=[]; history=[]; start=time.monotonic(); sim=None; vlm=None
     robot_depths={}
     rng=np.random.default_rng(seed)
@@ -142,6 +144,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
         current_frame_reselection_used=False
         approach_reselection_used=False
+        grasp_refinement_frames=set()
         def contact_annotation(observation,grounded_decision,original_object,original_part,purpose,*,source_supported=False):
             # One annotation transaction per frame. A second correction is
             # allowed only after measurable geometric progress; no new image.
@@ -280,6 +283,30 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             pending_decision=None
             save_observation(out/"observations",obs,decision)
             event("decision",**decision.model_dump())
+            if (task=='mug' and config.refine_grasp_grounding and decision.action=='grasp'
+                    and obs.frame_id not in grasp_refinement_frames):
+                # This explicit semantic request precedes contact/ray creation.
+                # It reuses acquired pixels, never annotation's observe action.
+                grasp_refinement_frames.add(obs.frame_id)
+                coarse=decision
+                try:
+                    crop=crop_grasp_proposal(obs,coarse,robot_depth=robot_depths.get(obs.frame_id))
+                    image_context=crop.provenance()
+                    event('grounding_refinement_request',frame_id=obs.frame_id,
+                        coarse_decision=coarse.model_dump(),image_context=image_context,
+                        observations_used=record.observations)
+                    refined=vlm.decide(crop.observation,INSTRUCTIONS[task],history,
+                        force_grasp=True,grounding_refinement=image_context,derived_image_context=image_context)
+                    decision=crop.restore_grasp_decision(refined)
+                    event('grounding_refinement_decision',frame_id=obs.frame_id,
+                        crop_decision=refined.model_dump(),restored_decision=decision.model_dump(),
+                        image_context=image_context)
+                    save_observation(out/'observations',obs,decision)
+                except (ValueError,RuntimeError) as exc:
+                    record.failure='grounding refinement: '+str(exc)
+                    event('grounding_refinement_rejected',frame_id=obs.frame_id,
+                        feedback=str(exc),coarse_decision=coarse.model_dump())
+                    break
             if decision.action=="abort": record.failure="agent_abort: "+decision.reason; break
             if decision.action=="observe":
                 if record.observations>=pregrasp_limit:
@@ -682,7 +709,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # additional frame; solid-object tasks remain capped at two. The independent evaluator still
             # verifies success if the observation budget is fully consumed.
             post_index=0;post_association=False
-            post_limit=config.max_observations
+            post_limit=phase_budget.postclose_limit
             max_post_views=reserve_after_close
             while record.observations<post_limit and post_index<max_post_views:
                 sweep=np.vstack([target+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
@@ -806,6 +833,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 raise RuntimeError('execution: post-close object/part association unverified; lift blocked')
             p,R=robot.pose(sim.q)
             planner.attached=(target-p)@R
+            planner.observed_payload_local=None
             attached_part=(target_part-p)@R
             np.save(out/'payload_source_points.npy',target)
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
@@ -829,13 +857,16 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     lift.append(q)
             finally:
                 planner.allow_payload_support=False;planner.end_payload_lift()
-            record.planning_seconds+=time.monotonic()-lift_timer
+                record.planning_seconds+=time.monotonic()-lift_timer
             execute(np.array(lift),1,"lift")
             sim.phase="hold"
             for _ in range(45): sim.step(lift[-1],1)
-            tracked_part=None
+            tracked_part=None;post_lift_observations_used=0
+            if phase_budget.postlift_observations and record.observations>=config.max_observations:
+                raise RuntimeError('execution: reserved post-lift verification observation unavailable')
             if record.observations<config.max_observations:
                 obs=observe(after_close=True)
+                post_lift_observations_used+=1
                 if task=='occluded':
                     held_p,held_R=robot.pose(sim.q)
                     association=contact_annotation(obs,decision,planner.attached@held_R.T+held_p,
@@ -868,6 +899,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # endpoints, then exclude the observed held target from the obstacle map.
             map_.remove_target_endpoints(target)
             if tracked is not None:
+                if task=='occluded':
+                    # Strict held semantics may expose previously unseen sides.
+                    # Keep them in every future payload collision check before
+                    # retiring their measured endpoints from the static map.
+                    held_p,held_R=robot.pose(sim.q)
+                    planner.add_observed_payload(tracked,held_p,held_R)
                 map_.remove_target_endpoints(tracked)
                 map_.set_target(tracked_part if task=='occluded' else tracked)
             held_p,held_R=robot.pose(sim.q)
@@ -875,7 +912,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # A predicted attachment pose is not observed object membership.
             # Keep actual occupied neighbors even near the expected held body.
             if task!='occluded':map_.remove_target_endpoints(held_estimate)
-            map_.set_payload_source(held_estimate)
+            collision_payload=(planner.payload_collision_local()@held_R.T+held_p
+                if task=='occluded' else held_estimate)
+            map_.set_payload_source(collision_payload)
             if task!="occluded": break
             if decision.place_point is None: raise RuntimeError("grounding: missing destination")
             # place_point refers to the pre-motion frame; recover that calibrated observation.
@@ -898,21 +937,95 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             event('placement_reference',**placement.diagnostic())
             (out/'placement_reference.json').write_text(json.dumps(placement.diagnostic(),indent=2))
             destination=placement.transfer_position;current_R=placement.rotation
-            transfer_timer=time.monotonic()
-            goal=robot.ik(destination,current_R,sim.q)
-            transfer=None if goal is None else planner.plan(sim.q,goal)
-            if transfer is None: raise RuntimeError("planning: transfer "+planner.last_failure)
-            record.planning_seconds+=time.monotonic()-transfer_timer
+            transfer_index=0;transfer_rng_state=None
+            while True:
+                # Reuse the search samples after new real image evidence. A
+                # camera-policy RNG draw must not turn recovery into a lucky
+                # unrelated RRT retry on an otherwise unchanged map.
+                if transfer_rng_state is not None:
+                    rng.bit_generator.state=copy.deepcopy(transfer_rng_state)
+                transfer_timer=time.monotonic()
+                try:
+                    attempt=plan_transfer_attempt(planner,sim.q,destination,current_R,
+                        time_budget=config.planning_seconds)
+                except Exception as exc:
+                    (out/f'transfer_planning_diagnostic_{transfer_index:03d}.json').write_text(json.dumps({
+                        'phase':'transfer','attempt':transfer_index,'frame_id':obs.frame_id,
+                        'failure':str(exc),'elapsed_seconds':time.monotonic()-transfer_timer,
+                        'observation_recovery_eligible':False},indent=2))
+                    raise
+                finally:
+                    record.planning_seconds+=time.monotonic()-transfer_timer
+                if transfer_rng_state is None:transfer_rng_state=attempt.rng_state
+                transfer_report={**attempt.report,'attempt':transfer_index,'frame_id':obs.frame_id,
+                    'rng_restored':transfer_index>0,'observations_used':record.observations,
+                    'post_lift_observations_used':post_lift_observations_used,
+                    'post_lift_observations_reserved':phase_budget.postlift_observations,
+                    'attachment_policy':'fixed original semantic/contact/placement reference; strictly associated new surfaces enlarge collision-only payload',
+                    'collision_payload_points':len(planner.payload_collision_local())}
+                (out/f'transfer_planning_diagnostic_{transfer_index:03d}.json').write_text(json.dumps(transfer_report,indent=2))
+                event('transfer_planning',attempt=transfer_index,frame_id=obs.frame_id,
+                    path_found=attempt.path is not None,failure=attempt.report['failure'],
+                    elapsed_seconds=attempt.report['elapsed_seconds'],
+                    rejected_unknown_points=len(attempt.unknown_points),rng_restored=transfer_index>0)
+                transfer=attempt.path
+                if transfer is not None:break
+                if not (phase_budget.postlift_observations>post_lift_observations_used
+                        and record.observations<config.max_observations
+                        and attempt.report['observation_recovery_eligible']):
+                    raise RuntimeError("planning: transfer "+planner.last_failure)
+                # Geometry search leaves the scratch robot at a rejected
+                # sample. View planning starts at the real stationary held
+                # pose and uses only actual UNKNOWN samples from that search.
+                robot.set_q(sim.q,planner.gripper)
+                held_p,held_R=robot.pose(sim.q)
+                held_object=planner.attached@held_R.T+held_p
+                held_part=attached_part@held_R.T+held_p
+                current_obs=replace(obs,q=sim.q.copy(),gripper_q=sim.gripper_q.copy())
+                transfer_advice=suggest_views(robot,current_obs,attempt.unknown_points,budget=1,
+                    required_points=attempt.unknown_points,focus_points=held_part,
+                    semantic_focus=held_object,observed_points=map_.surface)
+                history.append({'coverage_advice':transfer_advice,'feedback':
+                    'Transfer was rejected by actual UNKNOWN space. Choose one real mapping view covering these rejected samples and the visible held object. This view does not approve motion; the same object and permitted part must be verified again before replanning.'})
+                event('transfer_view_advice',**transfer_advice)
+                if strategy=='active':
+                    post=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True)
+                    event('transfer_recovery_decision',**post.model_dump())
+                    if post.action!='observe' or post.frame_id!=obs.frame_id or post.camera_id!=obs.camera_id:
+                        raise RuntimeError('grounding: transfer recovery requires a current-frame observation decision')
+                    selected=(post.azimuth,post.elevation,post.distance)
+                else:selected=None
+                selected=tabletop_view(strategy,initial_view,rng,selected)
+                sim.move_camera(*selected)
+                obs=observe(after_close=True);post_lift_observations_used+=1
+                association=contact_annotation(obs,decision,held_object,held_part,
+                    'post-lift transfer recovery object and permitted-part verification')
+                if association is None:
+                    raise RuntimeError('execution: transfer recovery held-object association unverified; transfer blocked')
+                # Represent every retired new surface in the held collision
+                # envelope. The original semantic/placement/contact reference
+                # remains fixed; the extra surface can only add refusals.
+                planner.add_observed_payload(association.object_points,held_p,held_R)
+                map_.remove_target_endpoints(association.object_points)
+                map_.set_target(association.part_points)
+                map_.set_payload_source(planner.payload_collision_local()@held_R.T+held_p)
+                event('transfer_recovery_perception',frame_id=obs.frame_id,
+                    associated_surface_points=len(association.object_points),
+                    permitted_part_points=len(association.part_points),
+                    post_lift_observations_used=post_lift_observations_used)
+                transfer_index+=1
             execute(transfer,1,"transfer")
             final_z=placement.release_position[2]
             lower=[sim.q];lower_timer=time.monotonic()
             planner.allow_payload_support=True
-            for z in np.linspace(destination[2],final_z,20)[1:]:
-                q=robot.ik(np.r_[destination[:2],z],current_R,lower[-1])
-                if q is None or not planner.edge(lower[-1],q,contact=True): raise RuntimeError("planning: lower "+planner.last_failure)
-                lower.append(q)
-            planner.allow_payload_support=False
-            record.planning_seconds+=time.monotonic()-lower_timer
+            try:
+                for z in np.linspace(destination[2],final_z,20)[1:]:
+                    q=robot.ik(np.r_[destination[:2],z],current_R,lower[-1])
+                    if q is None or not planner.edge(lower[-1],q,contact=True): raise RuntimeError("planning: lower "+planner.last_failure)
+                    lower.append(q)
+            finally:
+                planner.allow_payload_support=False
+                record.planning_seconds+=time.monotonic()-lower_timer
             execute(np.array(lower),1,"lower")
             sim.phase="release"
             for _ in range(60): sim.step(lower[-1],-1)

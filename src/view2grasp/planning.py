@@ -314,6 +314,9 @@ class Planner:
     def __init__(self,robot,map_,rng):
         self.robot=robot; self.map=map_; self.rng=rng; self.last_failure=""; self.checks=0
         self.attached=None; self.gripper=None; self.last_bad=0;self.deadline=None
+        # Additional strictly associated observed surfaces affect collision
+        # checks only. They never change semantic references or finger contact.
+        self.observed_payload_local=None
         self.allow_payload_support=False;self.payload_lift_origin=None
         self.failure_counts=Counter();self.best_bad=100000;self.best_unknown=None
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
@@ -328,6 +331,21 @@ class Planner:
 
     def end_payload_lift(self):
         self.payload_lift_origin=None
+
+    def add_observed_payload(self,points,position,rotation):
+        """Accumulate measured held surfaces in TCP coordinates for safety only."""
+        if self.attached is None:raise ValueError('cannot extend an unattached payload')
+        points=np.asarray(points,dtype=float)
+        if points.ndim!=2 or points.shape[1]!=3 or not np.isfinite(points).all():
+            raise ValueError('observed payload requires finite 3D surface points')
+        local=(points-np.asarray(position))@np.asarray(rotation)
+        previous=self.observed_payload_local
+        self.observed_payload_local=np.unique(local if previous is None else np.vstack([previous,local]),axis=0)
+
+    def payload_collision_local(self):
+        """Original attachment plus new observations, without changing contact."""
+        if self.observed_payload_local is None:return self.attached
+        return np.vstack([self.attached,self.observed_payload_local])
 
     def recovery_unknown(self):
         """Representative actually-rejected unknown robot points for next view."""
@@ -390,7 +408,8 @@ class Planner:
             return False
         if self.attached is not None:
             p,R=self.robot.pose()
-            held=self.attached@R.T+p
+            payload_local=self.payload_collision_local()
+            held=payload_local@R.T+p
             if hasattr(self.robot,'payload_intersects_noncontact_robot') and self.robot.payload_intersects_noncontact_robot(held):
                 self.last_failure='carried object intersects non-contact robot';return False
             state=self.map.classify(held)
@@ -402,7 +421,7 @@ class Planner:
             if (self.allow_payload_support and self.payload_lift_origin is not None and
                     hasattr(self.map,'payload_vertical_lift_shadow')):
                 p0,R0=self.payload_lift_origin
-                lift_source=self.attached@R0.T+p0
+                lift_source=payload_local@R0.T+p0
                 lift_shadow=self.map.payload_vertical_lift_shadow(lift_source,held)
                 state[lift_shadow & (state==UNKNOWN)]=FREE
             if self.allow_payload_support and hasattr(self.map,'support_contact_allowed'):
