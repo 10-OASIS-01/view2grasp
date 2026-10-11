@@ -18,6 +18,8 @@ from .observation_policy import tabletop_view
 from .observation_crop import crop_observation
 from .grounding import ContactAssociationError,GroundingResolver,track_surface
 from .grasp_semantics import check_vertical_part_midpoint
+from .annotation_diagnostic import build_annotation_diagnostic
+from .placement import tabletop_placement
 
 
 def leading_shell(points,resolution=.005):
@@ -135,11 +137,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     else 'the whole target object'),
                 'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
             annotation_request=copy.deepcopy(history[-1]['contact_reassociation'])
-            previous_diagnostics=None
+            previous_diagnostics=None;annotation_diagnostic=None
             for repair in range(3):
                 try:
                     annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
-                        observe_purpose='annotation',derived_image_context=image_context if crop is not None else None)
+                        observe_purpose='annotation',derived_image_context=image_context if crop is not None else None,
+                        annotation_diagnostic=annotation_diagnostic)
                     raw_annotation=annotation.model_dump()
                     event('contact_annotation_decision',image_context=image_context,repair=repair,**raw_annotation)
                     if crop is not None:annotation=crop.restore_decision(annotation)
@@ -174,6 +177,17 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                             if projection['bbox_normalized'] is not None:
                                 bounds=to_crop(np.asarray(projection['bbox_normalized']).reshape(2,2))
                                 projection['bbox_normalized']=np.asarray(bounds).ravel().tolist()
+                        # The auxiliary panel marks diagnostic pixel locations
+                        # on the same acquired RGB. It never changes the image
+                        # used by grounding or selects a replacement region.
+                        annotation_diagnostic=None
+                        try:
+                            annotation_diagnostic=build_annotation_diagnostic(annotation_observation,feedback)
+                            event('contact_annotation_diagnostic',frame_id=observation.frame_id,
+                                repair=repair+1,provenance=annotation_diagnostic.provenance())
+                        except ValueError as diagnostic_error:
+                            event('contact_annotation_diagnostic_unavailable',frame_id=observation.frame_id,
+                                reason=str(diagnostic_error))
                         history.append({'contact_reassociation':{**annotation_request,
                             'previous_annotation':raw_annotation,'geometry_rejection':feedback,
                             'instructions':annotation_request['instructions']+
@@ -494,6 +508,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             for _ in range(25): sim.step(approach[-1],1)
             planner.gripper=sim.gripper_q
             p,R=robot.pose(sim.q)
+            supported_grasp_p=p.copy();supported_grasp_R=R.copy()
+            source_support_z=map_.table_z
             preclose_target=target.copy()
             map_.certify_robot_state(robot.points(sim.q,sim.gripper_q)[0],
                 robot.volumes(sim.q,sim.gripper_q))
@@ -727,20 +743,31 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             if decision.place_point is None: raise RuntimeError("grounding: missing destination")
             # place_point refers to the pre-motion frame; recover that calibrated observation.
             old=np.load(out/"observations"/f"frame_{decision.frame_id:03d}.npz")
-            h,w=obs.depth.shape
+            h,w=old['depth'].shape
             uv=np.rint(np.array(decision.place_point)*[w-1,h-1]).astype(int)
             destination=unproject(uv,old["depth"][uv[1],uv[0]],old["K"],old["T_wc"])
             current_p,current_R=robot.pose(sim.q)
-            destination[2]=current_p[2]
+            # This tabletop task starts with the target supported on this same
+            # observed horizontal table. Visible top/side points do not locate
+            # its hidden physical bottom. Preserve the pre-lift supported pose
+            # and release with a gap, while centering the observed object
+            # reference (rather than the TCP) on the grounded destination.
+            placement=tabletop_placement(destination_xy=destination[:2],
+                observed_payload_local=planner.attached,
+                source_tcp_position=supported_grasp_p,source_rotation=supported_grasp_R,
+                current_tcp_position=current_p,current_rotation=current_R,
+                source_support_z=source_support_z,destination_support_z=map_.table_z,
+                source_supported=True)
+            event('placement_reference',**placement.diagnostic())
+            (out/'placement_reference.json').write_text(json.dumps(placement.diagnostic(),indent=2))
+            destination=placement.transfer_position;current_R=placement.rotation
             transfer_timer=time.monotonic()
             goal=robot.ik(destination,current_R,sim.q)
             transfer=None if goal is None else planner.plan(sim.q,goal)
             if transfer is None: raise RuntimeError("planning: transfer "+planner.last_failure)
             record.planning_seconds+=time.monotonic()-transfer_timer
             execute(transfer,1,"transfer")
-            # Height from observed target bottom and support surface, not object metadata.
-            bottom_offset=float(np.min(planner.attached@current_R.T,axis=0)[2])
-            final_z=map_.table_z-bottom_offset+.008
+            final_z=placement.release_position[2]
             lower=[sim.q];lower_timer=time.monotonic()
             planner.allow_payload_support=True
             for z in np.linspace(destination[2],final_z,20)[1:]:

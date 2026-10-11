@@ -158,6 +158,67 @@ def test_crop_context_cannot_change_a_grasp_or_mapping_input(tmp_path):
     assert client.calls==0
 
 
+def test_annotation_companion_preserves_primary_coordinates_and_audits_both_images(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    from test_annotation_diagnostic import feedback
+    obs=observation();diagnostic=build_annotation_diagnostic(obs,feedback(obs))
+    requests=[]
+    reply={'action':'observe','frame_id':1,'azimuth':0,'elevation':55,'distance':.8,
+        'point':[15/31,16/31]}
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(reply)}}]})
+    source=tmp_path/'source';client=VLM(source);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        answer=client.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+            derived_image_context={'kind':'test_crop'},annotation_diagnostic=diagnostic)
+    finally:client.client.close()
+    assert answer.point==tuple(reply['point']) # Companion canvas never remaps the answer.
+    call=json.loads((source/'call_000.json').read_text());request=call['request'];context=request['context']
+    assert context['image_size']=={'width':32,'height':32}
+    assert 'FIRST image' in context['annotation_context']['instructions']
+    assert 'not object labels' in context['annotation_context']['instructions']
+    images=requests[0]['messages'][1]['content'][1:]
+    assert len(images)==2
+    for index,rgb in enumerate((obs.rgb,diagnostic.rgb),start=1):
+        sent=base64.b64decode(images[index-1]['image_url']['url'].split(',',1)[1])
+        saved=source/request['messages'][1]['content'][index]['image_url']['url']
+        assert saved.read_bytes()==sent
+        assert np.array_equal(np.asarray(Image.open(io.BytesIO(sent))),rgb)
+    metadata=context['annotation_diagnostic']
+    assert request['image_sha256']==metadata['source_rgb_sha256']
+    assert request['annotation_diagnostic_sha256']==metadata['diagnostic_rgb_sha256']
+    assert hashlib.sha256((source/request['messages'][1]['content'][2]['image_url']['url']).read_bytes()).hexdigest()==metadata['diagnostic_png_sha256']
+    assert 'data:image' not in (source/'call_000.json').read_text()
+    replay=VLM(tmp_path/'replay',replay=source)
+    try:
+        assert replay.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+            derived_image_context={'kind':'test_crop'},annotation_diagnostic=diagnostic).point==answer.point
+    finally:replay.client.close()
+    for name,wrong in [('missing',None),('different',build_annotation_diagnostic(obs,feedback(obs,((7,7),))))]:
+        replay=VLM(tmp_path/name,replay=source)
+        try:
+            with pytest.raises(RuntimeError,match='diagnostic image mismatch'):
+                replay.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+                    derived_image_context={'kind':'test_crop'},annotation_diagnostic=wrong)
+        finally:replay.client.close()
+
+
+def test_annotation_companion_rejected_for_mapping_or_different_current_image(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    from test_annotation_diagnostic import feedback
+    obs=observation();diagnostic=build_annotation_diagnostic(obs,feedback(obs));client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='only for current-frame annotation'):
+            client.decide(obs,'test',[],annotation_diagnostic=diagnostic)
+        changed=replace(obs,rgb=np.ones_like(obs.rgb))
+        with pytest.raises(ValueError,match='current unmarked image'):
+            client.decide(changed,'test',[],force_observe=True,observe_purpose='annotation',annotation_diagnostic=diagnostic)
+        assert client.calls==0
+    finally:client.client.close()
+
+
 @pytest.mark.parametrize('mounted,forced',[(True,True),(False,False)])
 def test_approach_reselection_is_only_a_forced_tabletop_step(tmp_path,mounted,forced):
     obs=replace(observation(),base_pose=np.zeros(3) if mounted else None)

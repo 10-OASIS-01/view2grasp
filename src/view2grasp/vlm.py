@@ -216,19 +216,31 @@ class VLM:
         self.client = httpx.Client(timeout=self.settings.timeout_seconds)
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
-               observe_purpose='mapping_only',derived_image_context=None):
+               observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None):
         if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
             raise ValueError('unsupported observation purpose')
         if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
             raise ValueError(observe_purpose.replace('_',' ')+' requires a forced tabletop observation')
         if derived_image_context is not None and observe_purpose!='annotation':
             raise ValueError('derived images are supported only for current-frame annotation')
+        if annotation_diagnostic is not None:
+            if observe_purpose!='annotation':
+                raise ValueError('pixel diagnostics are supported only for current-frame annotation')
+            annotation_diagnostic.validate_source(obs)
         image = io.BytesIO(); Image.fromarray(obs.rgb).save(image,format="PNG")
         image_sha256=hashlib.sha256(obs.rgb.tobytes()).hexdigest()
         image_reference=f'../observations/frame_{obs.frame_id:03d}.png'
         if derived_image_context is not None:
             image_reference=f'input_frame_{obs.frame_id:03d}_{image_sha256[:16]}.png'
             (self.directory/image_reference).write_bytes(image.getvalue())
+        diagnostic_metadata=None;diagnostic_reference=None;diagnostic_image=None
+        if annotation_diagnostic is not None:
+            diagnostic_metadata=annotation_diagnostic.provenance()
+            diagnostic_image=io.BytesIO();Image.fromarray(annotation_diagnostic.rgb).save(diagnostic_image,format='PNG')
+            diagnostic_metadata['diagnostic_png_sha256']=hashlib.sha256(diagnostic_image.getvalue()).hexdigest()
+            diagnostic_metadata['primary_png_sha256']=hashlib.sha256(image.getvalue()).hexdigest()
+            diagnostic_reference=f'annotation_diagnostic_{obs.frame_id:03d}_{diagnostic_metadata["diagnostic_rgb_sha256"][:16]}.png'
+            (self.directory/diagnostic_reference).write_bytes(diagnostic_image.getvalue())
         user = {"instruction":instruction,"frame_id":obs.frame_id,"camera_id":obs.camera_id,"view":obs.view,
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
@@ -238,6 +250,8 @@ class VLM:
         if camera_context is not None:user['tabletop_camera_context']=camera_context
         if derived_image_context is not None:
             user['derived_image_context']=copy.deepcopy(derived_image_context)
+        if diagnostic_metadata is not None:
+            user['annotation_diagnostic']=diagnostic_metadata
         if force_observe and obs.base_pose is None:
             if observe_purpose=='mapping_only':
                 user['mapping_context']=_mapping_context(obs,history)
@@ -257,9 +271,23 @@ class VLM:
                         'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
                         'All normalized coordinates refer to this image_size, including when it is a crop. '
                         'A projected crop does not establish visibility or identity. Omit uncertain regions.'}
+                if diagnostic_metadata is not None:
+                    user['annotation_context']['instructions']+=(
+                        ' The FIRST image is the unmarked current image and the only output coordinate system. '
+                        'The SECOND image is a magnified coordinate aid from the same pixels; its grid and magenta pixel borders '
+                        'are geometry diagnostics, not object labels or a suggested mask. Use its raw-pixel indices to locate '
+                        'the rejected pixels, then visually reinspect material and boundaries in the first image. '
+                        'Do not blindly delete marked pixels. Return normalized FIRST-image coordinates x/(width-1), y/(height-1); '
+                        'never use the companion canvas dimensions, margins or grid cells as output coordinates.')
+        primary_url='data:image/png;base64,'+base64.b64encode(image.getvalue()).decode()
+        image_references={primary_url:image_reference}
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
             {"type":"text","text":json.dumps(user)},
-            {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]
+            {"type":"image_url","image_url":{"url":primary_url}}]}]
+        if diagnostic_image is not None:
+            diagnostic_url='data:image/png;base64,'+base64.b64encode(diagnostic_image.getvalue()).decode()
+            messages[-1]['content'].append({'type':'image_url','image_url':{'url':diagnostic_url}})
+            image_references[diagnostic_url]=diagnostic_reference
         last_error = None
         for repair in range(3):
             # A rejected answer and its correction are added to the *next*
@@ -285,6 +313,10 @@ class VLM:
                             original=Image.open(source_image).convert('RGB').tobytes()
                             if hashlib.sha256(original).hexdigest()!=image_sha256:
                                 raise RuntimeError("legacy response replay image mismatch")
+                    expected_diagnostic=saved['request'].get('annotation_diagnostic_sha256')
+                    actual_diagnostic=None if diagnostic_metadata is None else diagnostic_metadata['diagnostic_rgb_sha256']
+                    if expected_diagnostic!=actual_diagnostic:
+                        raise RuntimeError('response replay annotation diagnostic image mismatch')
                     response = saved["response"]
                 else:
                     r = self.client.post(self.settings.base_url+"/chat/completions",
@@ -359,11 +391,13 @@ class VLM:
                     if isinstance(message.get("content"),list):
                         for item in message["content"]:
                             if item.get("type")=="image_url":
-                                item["image_url"]["url"]=image_reference
+                                item["image_url"]["url"]=image_references[item['image_url']['url']]
                 request_log = {"model":logged_model,"connection":connection,
                     "transport":"replay" if self.replay else "online",
                     "context":user,"messages":logged,"repair":repair,
                     "image_sha256":image_sha256}
+                if diagnostic_metadata is not None:
+                    request_log['annotation_diagnostic_sha256']=diagnostic_metadata['diagnostic_rgb_sha256']
                 log_text=json.dumps({"request":request_log,
                     "response":response,"seconds":elapsed,"error":last_error},ensure_ascii=False,indent=2)
                 (self.directory/f"call_{index:03d}.json").write_text(self.settings.redact(log_text))

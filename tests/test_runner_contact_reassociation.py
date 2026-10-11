@@ -128,6 +128,14 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             assert kwargs['observe_purpose']=='annotation'
             image_context=history[-1]['contact_reassociation']['image_context']
             assert kwargs['derived_image_context']==(None if crop_mode=='fallback' else image_context)
+            diagnostic=kwargs.get('annotation_diagnostic')
+            repair_feedback=history[-1]['contact_reassociation'].get('geometry_rejection')
+            assert (diagnostic is not None)==(repair_feedback is not None)
+            if diagnostic is not None:
+                # Geometry and returned coordinates still use the acquired
+                # observation, independently of the extra diagnostic panel.
+                assert diagnostic.rgb.shape!=obs.rgb.shape
+                assert obs.rgb.shape[:2]==obs.depth.shape
             outcome=('accepted' if (post_close and obs.frame_id==2) or
                 (post_lift and obs.frame_id<4) else annotation_outcome)
             if outcome=='repair_then_accept':
