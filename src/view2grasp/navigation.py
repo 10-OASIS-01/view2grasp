@@ -1,9 +1,11 @@
 """SE(2) navigation against observed geometry. No simulator imports or handles."""
 import heapq
 import time
+import copy
 import numpy as np
 from scipy.spatial import cKDTree
-from .mapping import FREE
+from .geometry import project
+from .mapping import UNKNOWN, FREE, OCCUPIED
 
 
 def wrap_angle(value):
@@ -29,6 +31,7 @@ class NavigationCollision:
                  shadow_pose=None,shadow_distance=0.):
         self.map=depth_map
         self.points=np.asarray(body_points)
+        self.body_count=len(self.points)
         if payload is not None:self.points=np.vstack([self.points,payload])
         self.floor_z=float(floor_z)
         floor=np.asarray(floor_points)
@@ -37,18 +40,109 @@ class NavigationCollision:
         self.shadow_distance=float(shadow_distance)
         self.shadow_reference=None if self.shadow_pose is None else transform_body(self.points,self.shadow_pose)
         self.last_failure=""
+        self.last_rejection=None
+
+    def reset_diagnostics(self):
+        self.last_failure=''
+        self.last_rejection=None
+
+    def _reject(self, reason, pose, points, indices, state, **details):
+        """Retain bounded samples; expensive frame inspection is on demand only."""
+        self.last_failure=reason
+        indices=np.asarray(indices,dtype=int)
+        selected=indices[np.linspace(0,len(indices)-1,min(32,len(indices)),dtype=int)] if len(indices) else indices
+        names={UNKNOWN:'unknown',FREE:'free',OCCUPIED:'occupied'}
+        self.last_rejection={
+            'reason':reason,'pose':np.asarray(pose).tolist(),
+            'state_counts':{name:int(np.count_nonzero(state==value)) for value,name in names.items()},
+            'rejected_sample_count':len(indices),'samples_truncated':len(indices)>len(selected),
+            'bounds_world':None if not len(indices) else [points[indices].min(axis=0).tolist(),points[indices].max(axis=0).tolist()],
+            'samples':[{'sample_index':int(i),'component':'body' if i<self.body_count else 'payload',
+                        'world':points[i].tolist(),'state':names.get(int(state[i]),'unknown')}
+                       for i in selected],
+            **details,
+        }
+        return False
+
+    def diagnostic(self):
+        """Explain the latest rejection without changing any map or safety rule.
+
+        DepthMap retains occupied endpoints beyond its RGB-D view window and
+        does not store per-voxel provenance. These projections are supporting
+        evidence from retained frames, never asserted to be the source frame.
+        """
+        rejection=copy.deepcopy(self.last_rejection)
+        report={'last_failure':self.last_failure,'last_rejection':rejection}
+        if rejection is None:return report
+        views=getattr(self.map,'views',[])
+        report['map_context']={
+            'surface_points':len(getattr(self.map,'surface',[])),
+            'resolution_m':getattr(self.map,'resolution',None),
+            'retained_frames':[{'frame_id':int(o.frame_id),'camera_id':o.camera_id} for o in views],
+            'source_attribution':'retained_frame_projection_only; occupied_voxel_source_unavailable',
+        }
+        samples=rejection['samples']
+        if not samples:return report
+        points=np.asarray([s['world'] for s in samples])
+        if rejection['reason']=='unknown floor support':
+            for sample in samples:
+                if self.floor is None:sample['nearest_floor_support']=None
+                else:
+                    distance,index=self.floor.query(sample['world'][:2])
+                    sample['nearest_floor_support']={'xy':self.floor.data[index].tolist(),'distance_m':float(distance)}
+        tree=getattr(self.map,'tree',None)
+        if tree is not None:
+            distances,indices=tree.query(points)
+            for sample,distance,index in zip(samples,distances,indices):
+                if np.isfinite(distance):
+                    sample['nearest_occupied_endpoint']={'world':tree.data[index].tolist(),'distance_m':float(distance)}
+        # Include all retained frames: navigation uses a bounded frame window.
+        # Projection cannot establish the provenance of an old occupied voxel.
+        for i,obs in enumerate(views):
+            uv,z=project(points,obs.K,obs.T_wc)
+            h,w=obs.depth.shape
+            masks=getattr(self.map,'self_masks',[])
+            blocked_masks=getattr(self.map,'occlusion_masks',[])
+            for j,sample in enumerate(samples):
+                evidence={'frame_id':int(obs.frame_id),'camera_id':obs.camera_id}
+                if z[j]<=.01 or not np.isfinite(uv[j]).all():
+                    evidence['relation']='outside_frame'
+                else:
+                    u,v=np.rint(uv[j]).astype(int)
+                    evidence.update(pixel=[int(u),int(v)],point_depth_m=float(z[j]))
+                    if not (1<=u<w-1 and 1<=v<h-1):
+                        evidence['relation']='outside_frame'
+                    else:
+                        d=float(obs.depth[v,u])
+                        self_pixel=bool(masks[i][v,u]) if i<len(masks) else False
+                        blocked=bool(blocked_masks[i][v,u]) if i<len(blocked_masks) else False
+                        evidence.update(measured_depth_m=d if np.isfinite(d) else None,
+                                        robot_self_pixel=self_pixel,robot_occlusion_pixel=blocked)
+                        if blocked:evidence['relation']='robot_occluded'
+                        elif not np.isfinite(d) or d<=.05:evidence['relation']='invalid_depth'
+                        elif z[j]<min(d,getattr(self.map,'max_depth',3.))+(.002 if self_pixel else -.0002):
+                            evidence['relation']='free_ray'
+                        else:evidence['relation']='at_or_behind_depth_return'
+                sample.setdefault('depth_evidence',[]).append(evidence)
+        return report
 
     def __call__(self, pose):
         points=transform_body(self.points,pose)
         if not np.isfinite(points).all():return False
         # Wheel-floor contact needs actual observed floor support, not an infinite plane.
         low=points[:,2]<=self.floor_z+.025
-        if self.floor is None or (np.any(low) and np.any(self.floor.query(points[low,:2])[0]>.035)):
-            self.last_failure='unknown floor support';return False
-        state=self.map.classify(points[~low])
-        if np.any(state==2):
-            self.last_failure='occupied robot sweep'
-            return False
+        floor_distances=np.full(np.count_nonzero(low),np.inf) if self.floor is None else self.floor.query(points[low,:2])[0]
+        state=np.full(len(points),FREE,dtype=np.uint8)
+        if self.floor is None or np.any(floor_distances>.035):
+            indices=np.flatnonzero(low)[floor_distances>.035]
+            state[indices]=UNKNOWN
+            return self._reject('unknown floor support',pose,points,indices,state,
+                                floor_z=self.floor_z,floor_support_radius_m=.035,
+                                classification_scope='floor_support_only',
+                                state_counts={'unknown':len(indices),'free':int(np.count_nonzero(low))-len(indices),'occupied':0})
+        state[~low]=self.map.classify(points[~low])
+        if np.any(state==OCCUPIED):
+            return self._reject('occupied robot sweep',pose,points,np.flatnonzero(state==OCCUPIED),state)
         unknown=state!=FREE
         if np.any(unknown):
             # An onboard depth rig cannot see the infinitesimal layer directly
@@ -58,10 +152,12 @@ class NavigationCollision:
             # UNKNOWN-space waiver: occupied returns and unobserved floor remain
             # blocking, and the certificate expires after every short step.
             if self.shadow_reference is None or self.shadow_distance<=0:
-                self.last_failure='unknown robot sweep';return False
+                return self._reject('unknown robot sweep',pose,points,np.flatnonzero(unknown),state)
             moved=np.linalg.norm(points-self.shadow_reference,axis=1)
-            if np.any(moved[~low][unknown]>self.shadow_distance+1e-9):
-                self.last_failure='unknown robot sweep beyond local self-shadow certificate';return False
+            beyond=unknown&(moved>self.shadow_distance+1e-9)
+            if np.any(beyond):
+                return self._reject('unknown robot sweep beyond local self-shadow certificate',pose,points,np.flatnonzero(beyond),state,
+                                    shadow_pose=self.shadow_pose.tolist(),shadow_distance_m=self.shadow_distance)
         self.last_failure='';return True
 
 
@@ -70,6 +166,13 @@ class SE2Planner:
         self.valid=collision_free;self.resolution=resolution;self.bins=heading_bins
         self.angle_step=2*np.pi/heading_bins
         self.last_failure='';self.checks=0
+        self.last_edge_rejection=None
+
+    def diagnostic(self):
+        report={'failure':self.last_failure,'collision_checks':self.checks,
+                'last_rejected_edge':copy.deepcopy(self.last_edge_rejection)}
+        if hasattr(self.valid,'diagnostic'):report['collision']=self.valid.diagnostic()
+        return report
 
     def edge(self, a, b):
         a,b=np.asarray(a),np.asarray(b)
@@ -78,14 +181,21 @@ class SE2Planner:
               int(np.ceil(abs(delta[2])/.025))+1)
         for t in np.linspace(0,1,n):
             self.checks+=1
-            if not self.valid(a+t*delta):return False
+            if not self.valid(a+t*delta):
+                self.last_edge_rejection={'start':a.tolist(),'end':b.tolist(),
+                    'fraction':float(t),'pose':(a+t*delta).tolist()}
+                return False
         return True
 
     def plan(self, start, goal, hints=(), time_budget=20., max_nodes=30000):
         start,goal=np.asarray(start,dtype=float),np.asarray(goal,dtype=float)
         if not np.isfinite(np.r_[start,goal]).all():raise ValueError('nonfinite SE2 goal')
+        self.last_failure='';self.checks=0;self.last_edge_rejection=None
+        if hasattr(self.valid,'reset_diagnostics'):self.valid.reset_diagnostics()
         timer=time.monotonic()
+        self.checks+=1
         if not self.valid(start):self.last_failure='start lacks observed clearance';return None
+        self.checks+=1
         if not self.valid(goal):self.last_failure='goal lacks observed clearance';return None
         if self.edge(start,goal):return np.stack([start,goal])
         origin=start.copy()

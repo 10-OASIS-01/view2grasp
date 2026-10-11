@@ -41,6 +41,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             if (repository/name).exists():archive.write(repository/name,name)
         archive.writestr('episode_config.json',config.model_dump_json(indent=2))
     record=EpisodeRecord(task,seed,strategy,online=replay is None)
+    # Every pre-close branch shares this limit, including residual recovery and
+    # retries. Keep at least the initial observation for small smoke-test budgets.
+    reserve_after_close=min(3 if task=='mug' else 2,config.max_observations-1)
+    pregrasp_limit=config.max_observations-reserve_after_close
     events=[]; history=[]; start=time.monotonic(); sim=None; vlm=None
     robot_depths={}
     rng=np.random.default_rng(seed)
@@ -58,7 +62,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
         vlm=VLM(out/"vlm",replay=replay)
         resolver=GroundingResolver.from_config(config)
         event('perception_backend',sam_available=resolver.segmenter is not None,reason=resolver.sam_unavailable_reason)
-        def observe():
+        def observe(*,after_close=False):
+            limit=config.max_observations if after_close else pregrasp_limit
+            if record.observations>=limit:
+                raise RuntimeError('observation budget exhausted for '+('episode' if after_close else 'pre-grasp mapping'))
             obs=sim.observe(); record.observations+=1
             save_observation(out/"observations",obs)
             self_depth=robot.depth(obs);robot_depths[obs.frame_id]=self_depth
@@ -96,12 +103,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'No coverage-only view is prescribed for handle grounding. Infer the handle plane from this image and choose the reachable -X-side broadside described in the task.'})
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={}
-        while record.observations<config.max_observations and record.attempts<config.max_attempts:
+        while record.observations<=pregrasp_limit and record.attempts<config.max_attempts:
             # Freeze the handled-object representation rule before validation:
             # one chosen broadside view, then a handle grounding or abort. This
             # preserves the approach ray and reserves evidence for planning and
             # the post-close payload sweep instead of test-time view shopping.
-            force_at=2 if task=="mug" else config.max_observations-3
+            force_at=min(2 if task=="mug" else config.max_observations-3,pregrasp_limit)
             decision=pending_decision or vlm.decide(obs,INSTRUCTIONS[task],history,
                 force_grasp=record.observations>=force_at or strategy!="active")
             pending_decision=None
@@ -109,6 +116,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             event("decision",**decision.model_dump())
             if decision.action=="abort": record.failure="agent_abort: "+decision.reason; break
             if decision.action=="observe":
+                if record.observations>=pregrasp_limit:
+                    record.failure='observation budget reserved for post-grasp mapping'
+                    event('observation_budget_reserved',observations=record.observations,
+                        reserved_after_close=reserve_after_close)
+                    break
                 sim.move_camera(decision.azimuth,decision.elevation,decision.distance)
                 # Preserve the agent's visual inference (for example the mug's
                 # handle direction) as compact textual memory. Images are still
@@ -158,7 +170,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             history.append({"view":obs.view,"feedback":feedback})
             if chosen is None:
                 record.failure="planning: "+feedback
-                if record.observations>=config.max_observations-1: break
+                if record.observations>=pregrasp_limit:
+                    event('observation_budget_reserved',observations=record.observations,
+                        reserved_after_close=reserve_after_close)
+                    break
                 recovery=None
                 recovery_points=planner.recovery_unknown()
                 if not len(recovery_points): recovery_points=planner.best_unknown
@@ -168,11 +183,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # Closing moves both the gripper and the target. A single
                     # orbit view cannot in general expose the whole arm corridor
                     # and the leading payload shell (the block run left two arm
-                    # and 34 payload voxels unseen). Reserve two mapping frames
-                    # for every grasp task instead of weakening unknown-space
-                    # collision checks for geometrically simpler objects.
-                    reserve_after_close=3 if task=='mug' else 2
-                    recovery_budget=max(1,config.max_observations-record.observations-reserve_after_close)
+                    # and 34 payload voxels unseen). Spend only the shared
+                    # pre-close allowance; residual retries obey the same cap.
+                    recovery_budget=pregrasp_limit-record.observations
                     recovery=suggest_views(robot,obs,recovery_points,budget=recovery_budget,
                         focus_points=target_part,observed_points=map_.surface)
                     history.append({'coverage_advice':recovery,'feedback':
@@ -186,7 +199,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # Active VLM chooses the next move from the same image and failure feedback.
                 if strategy=="active":
                     steps=1 if recovery is None else min(len(recovery.get('views',[])),
-                        config.max_observations-record.observations-1)
+                        pregrasp_limit-record.observations)
                     recovered=False
                     for recovery_index in range(steps):
                         # Unknown-space recovery is mapping-only. A grasp from a
@@ -239,15 +252,17 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         record.failure="planning: "+retry_feedback
                         remaining_unknown=planner.recovery_unknown()
                         followup=None
-                        if len(remaining_unknown) and record.observations<config.max_observations-1:
+                        if len(remaining_unknown) and record.observations<pregrasp_limit:
                             followup=suggest_views(robot,obs,remaining_unknown,
-                                budget=min(2,config.max_observations-record.observations-1),
+                                budget=min(2,pregrasp_limit-record.observations),
                                 focus_points=target_part,observed_points=map_.surface)
                             event('retry_recovery_view_advice',**followup)
                         history.append({'feedback':record.failure,
                             'coverage_advice':followup,
                             'remaining_unknown_points':len(remaining_unknown),
-                            'next_step':'Observation budget remains. If coverage advice has a view, observe it to certify the exact residual path points; otherwise re-ground away from non-finger target interference. Do not reuse a failed grasp blindly.'})
+                            'next_step':('If coverage advice has a view, observe it to certify the exact residual path points; otherwise re-ground away from non-finger target interference. Do not reuse a failed grasp blindly.'
+                                if record.observations<pregrasp_limit else
+                                'Pre-grasp observation budget is exhausted; preserve the post-close mapping reserve and stop without executing an uncertified grasp.')})
                         # Keep this as one recovery transaction. The new frame
                         # updates geometry only; retry the stored image ray and
                         # candidates instead of silently changing the grasp by
@@ -271,13 +286,20 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                     time_budget=config.planning_seconds)
                                 record.planning_seconds+=time.monotonic()-residual_timer
                                 residual_feedback=planner.last_failure if chosen is None else 'planned'
+                                (out/f'planning_diagnostic_{obs.frame_id:03d}_residual.json').write_text(json.dumps({
+                                    'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
+                                    'closest_by_failure':planner.closest_by_failure,
+                                    'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
                                 event('retry_recovery_planning',feedback=residual_feedback,checks=planner.checks,
                                     preserved_grounding_frame=decision.frame_id)
                                 if chosen is not None:record.failure=''
                         if chosen is not None:
                             pass
-                        elif record.observations<config.max_observations-1:continue
-                        else:break
+                        elif record.observations<pregrasp_limit:continue
+                        else:
+                            event('observation_budget_reserved',observations=record.observations,
+                                reserved_after_close=reserve_after_close)
+                            break
                     record.failure=""
                 else:
                     obs=observe(); continue
@@ -332,7 +354,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # verifies success if the observation budget is fully consumed.
             post_index=0
             post_limit=config.max_observations
-            max_post_views=3 if task=='mug' else 2
+            max_post_views=reserve_after_close
             while record.observations<post_limit and post_index<max_post_views:
                 sweep=np.vstack([target+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
                 sweep_unknown=sweep[map_.classify(sweep)==0]
@@ -396,7 +418,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 sim.move_camera(*selected)
                 history.append({'view':obs.view,'selected_view':selected,
                     'feedback':'completed one post-grasp mapping observation'})
-                obs=observe()
+                obs=observe(after_close=True)
                 current_target=resolver.track(obs,target,robot_depths.get(obs.frame_id),support_z=map_.table_z)
                 if current_target is not None and len(current_target)>=20:
                     # Different views expose different surfaces: a median shift
@@ -457,7 +479,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             sim.phase="hold"
             for _ in range(45): sim.step(lift[-1],1)
             if record.observations<config.max_observations:
-                obs=observe()
+                obs=observe(after_close=True)
                 tracked=resolver.track(obs,target+[0,0,.13],robot_depths.get(obs.frame_id),support_z=map_.table_z)
                 lifted=tracked is not None and float(np.median(tracked[:,2]))>float(np.median(target[:,2]))+.07 and abs(sim.gripper_q[0]-sim.gripper_q[1])>.006
                 event("visual_verification",lifted=bool(lifted))
@@ -477,7 +499,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 sim.phase="release"
                 for _ in range(20): sim.step(sim.q,-1)
                 planner.attached=None; planner.gripper=None; map_.clear_dynamic()
-                if record.observations<config.max_observations-1: obs=observe(); continue
+                if record.observations<pregrasp_limit: obs=observe(); continue
                 break
             # The world is static except for the grasped target. Remove its old
             # endpoints, then exclude the observed held target from the obstacle map.

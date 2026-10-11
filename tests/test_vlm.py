@@ -47,6 +47,38 @@ def test_service_error_is_bounded(tmp_path):
     assert client.calls==3
     client.client.close()
 
+
+def test_tabletop_observe_repairs_missing_camera_fields_instead_of_using_defaults(tmp_path):
+    responses=[
+        {'action':'observe','frame_id':1,'reason':'Use azimuth 90, elevation 0, distance 1.3'},
+        {'action':'observe','frame_id':1,'azimuth':90,'elevation':0,'distance':1.3},
+    ]
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(responses.pop(0))}}]})))
+    try:
+        decision=client.decide(observation(),'Map the rejected path',[],force_observe=True)
+    finally:client.client.close()
+    assert client.calls==2
+    assert (decision.azimuth,decision.elevation,decision.distance)==(90,0,1.3)
+    first=json.loads((tmp_path/'call_000.json').read_text())
+    assert 'explicit azimuth, elevation and distance' in first['error']
+
+
+def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
+    from dataclasses import replace
+    import numpy as np
+    obs=replace(observation(),base_pose=np.zeros(3))
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'observation_camera':'robot0_eye_in_hand',
+        })}}]})))
+    try:
+        decision=client.decide(obs,'Inspect the held object',[],force_observe=True)
+    finally:client.client.close()
+    assert client.calls==1 and decision.observation_camera=='robot0_eye_in_hand'
+
 def test_timeout_is_bounded_and_logged(tmp_path):
     client=VLM(tmp_path);client.client.close()
     def timeout(request):raise httpx.ReadTimeout('deliberate test timeout',request=request)

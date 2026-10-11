@@ -38,6 +38,8 @@ class MobileEvaluator:
         self.sim=sim;self.history=[];self.collision=False;self.stable=0;self.native=False
         self.initial_base=sim.base_pose.copy();self.last_base=self.initial_base.copy()
         self.path_length=0.;self.held_path_length=0.
+        self.first_grasp_success=None;self.lift_started=None;self.last_attempt=0
+        self.target_body=None;self.initial_target_z=None
         env=sim.env
         self.robot_geoms={i for i in range(env.sim.model.ngeom)
             if (env.sim.model.geom_id2name(i) or '').startswith(('robot0_','gripper0_','mobilebase0_'))}
@@ -49,6 +51,8 @@ class MobileEvaluator:
         target_name={'DeliverBrewedCoffee':'brewed_coffee','DeliverCanToBowl':'soda_can'}.get(sim.task)
         if target_name:
             self.target={env.sim.model.geom_name2id(n) for n in env.objects[target_name].contact_geoms}
+            self.target_body=env.obj_body_id[target_name]
+            self.initial_target_z=float(env.sim.data.body_xpos[self.target_body,2])
 
     def update(self):
         env=self.sim.env
@@ -61,7 +65,8 @@ class MobileEvaluator:
             if ra==rb:continue
             robot,other=(a,b) if ra else (b,a)
             if robot in self.fingers and other in self.target:
-                contact_sides.update(i for i,side in enumerate(self.finger_sides) if robot in side);continue
+                if c.dist<=0:contact_sides.update(i for i,side in enumerate(self.finger_sides) if robot in side)
+                continue
             name=env.sim.model.geom_id2name(other) or ''
             # Expected base-floor support, never arm-wall/counter contact.
             rn=env.sim.model.geom_id2name(robot) or ''
@@ -69,15 +74,29 @@ class MobileEvaluator:
             if c.dist<-.001:self.collision=True
         contacts=len(contact_sides)==2
         if contacts:self.held_path_length+=distance
+        attempt=getattr(self.sim,'episode_attempt',0)
+        now=float(env.sim.data.time)
+        lifted=False;lift_seconds=0.
+        if self.target_body is not None:
+            lifted=bool(contacts and env.sim.data.body_xpos[self.target_body,2]-self.initial_target_z>=.08)
+            if attempt>0 and self.first_grasp_success is None:self.first_grasp_success=False
+            if attempt!=self.last_attempt or not lifted:self.lift_started=None
+            if lifted and attempt>0:
+                if self.lift_started is None:self.lift_started=now
+                lift_seconds=now-self.lift_started
+                if attempt==1 and lift_seconds>=2.-1e-9:self.first_grasp_success=True
+        self.last_attempt=attempt
         self.last_base=base.copy()
         self.native=bool(env._check_success())
         self.stable=self.stable+1 if self.native else 0
-        self.history.append({'time':float(env.sim.data.time),'native':self.native,
-                             'stable_steps':self.stable,'collision':self.collision,'held_contact':contacts})
+        self.history.append({'time':now,'native':self.native,'phase':self.sim.phase,
+                             'stable_steps':self.stable,'collision':self.collision,'held_contact':contacts,
+                             'attempt':attempt,'lifted':lifted,'stable_lift_seconds':lift_seconds})
 
     def result(self):
         stable=self.native if self.sim.task=='NavigateKitchen' else self.stable>=40
         mobile=(self.held_path_length>=.5) if self.sim.task in ('DeliverBrewedCoffee','DeliverCanToBowl') else True
         return {'success':bool(stable and mobile),'collision_free_success':bool(stable and mobile and not self.collision),'official_success':self.native,
             'stable_success':bool(stable),'collision':self.collision,'path_length_m':self.path_length,
+            'first_grasp_success':self.first_grasp_success,
             'held_path_length_m':self.held_path_length,'required_held_transport_met':mobile,'history':self.history}

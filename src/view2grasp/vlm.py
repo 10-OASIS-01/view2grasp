@@ -101,7 +101,8 @@ Navigate: ground navigation_goal on visible FLOOR and look_at on the destination
 optionally propose a ground_path. Paths are planning hints, NOT certified free
 space. An end_effector_path has no implied depth from the image background.
 For tabletop observe, specify azimuth [-180,180], elevation [-15,85], distance
-[.55,1.3]. Orbit center [-.12,0,.95]; azimuth 0 is world +X, 90 is +Y. The Panda
+[.55,1.3] as three explicit JSON fields, not only in the reason text.
+Orbit center [-.12,0,.95]; azimuth 0 is world +X, 90 is +Y. The Panda
 base is on -X. Low broadside views expose mug-handle apertures; overhead views
 often suit blocks. Coverage advice uses only observed geometry and robot model.
 For mounted cameras, observe selects observation_camera from available_cameras and optional
@@ -111,6 +112,13 @@ of the supplied image, even when observe requests a different camera separately.
 If must_ground_now is true, grasp or abort. If must_observe_now is true, observe.
 Unknown-space rejection means acquire relevant additional observations. Respect
 remaining budgets. finish reports a visual hypothesis, not evaluator success.
+Tabletop mapping-only recovery preserves the previously grounded grasp and its
+camera-to-contact approach ray. The recovery camera does NOT select a new grasp
+approach: it should reveal UNKNOWN space along the stored robot/payload path.
+Prefer an unvisited view from the latest coverage_advice, even when that view is
+poor for recognizing or grasping the target. Avoid repeating the current view
+when the scene has not moved: another identical image adds no coverage. Explain
+which advised view you choose or why a different unvisited view is needed.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
 
@@ -182,9 +190,12 @@ class VLM:
                 if decision.frame_id != obs.frame_id: raise ValueError("frame_id is stale")
                 if decision.camera_id != obs.camera_id: raise ValueError("camera_id is stale or incorrect")
                 if decision.action not in user['allowed_actions']:raise ValueError('action is not supported in the current backend')
+                if decision.action=='observe' and obs.base_pose is None:
+                    if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
+                        raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
                 if force_grasp and decision.action == "observe": raise ValueError("observation budget exhausted: grasp or abort")
-                if force_observe and decision.action != "observe": raise ValueError("post-action map refresh requires an observe action")
+                if force_observe and decision.action != "observe": raise ValueError("this mapping step requires an observe action to collect additional geometry")
                 last_error=None
                 return decision
             except (ValueError, KeyError, httpx.HTTPError) as exc:
