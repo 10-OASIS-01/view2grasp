@@ -214,7 +214,9 @@ def run_mobile_episode(task,seed,strategy,root,config):
         def acquire(camera=None,safety=False):
             nonlocal safety_observations
             if not safety:
-                if record.observations>=budget:raise RuntimeError('observation budget exhausted')
+                if record.observations>=budget:
+                    event('observation_budget_exhausted',observations=record.observations,budget=budget)
+                    raise RuntimeError('observation budget exhausted')
                 record.observations+=1
             else:safety_observations+=1
             robot.set_auxiliary_state(sim.auxiliary_state())
@@ -384,6 +386,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 if decision.action=='finish':
                     sim.phase='verify'
                     for _ in range(45):step(sim.q,grip)
+                    record.failure='execution: independent success criterion not met after finish'
                     break
                 if decision.action=='navigate':
                     goals=[g for g in decision.groundings if g.role=='navigation_goal']
@@ -536,7 +539,10 @@ def run_mobile_episode(task,seed,strategy,root,config):
             except ValueError as exc:
                 history.append({'feedback':str(exc)});event('rejected',reason=str(exc));record.failure=str(exc)
                 record.geometry_rejections.append(str(exc))
-            if record.observations>=budget:break
+            if record.observations>=budget:
+                record.failure='observation budget exhausted'
+                event('observation_budget_exhausted',observations=record.observations,budget=budget)
+                break
             camera=next_high_level_camera(strategy,decision,sim.camera,rng)
             obs,self_depth=acquire(camera)
             if payload is not None and payload.state!='closed_unverified':
