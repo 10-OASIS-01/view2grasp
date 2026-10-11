@@ -150,3 +150,75 @@ def test_success_keeps_original_points_and_report_without_diagnostic_side_effect
     assert np.array_equal(result.part_points, xyz[mask])
     assert result.report['object_pixels'] == result.report['part_pixels'] == 16
     assert result.report['grasp_ray_changed'] is False
+
+
+def test_part_outside_object_reports_exact_pixel_without_intersection_or_expansion():
+    obs, xyz, mask, reference = scene()
+    obs = replace(obs, frame_id=19, camera_id='actual_camera')
+    part = mask.copy(); part[10, 12] = True
+    original_mask, original_part, original_depth = mask.copy(), part.copy(), obs.depth.copy()
+    error, d = diagnostic_for(obs, mask, reference, part_mask=part)
+    assert str(error) == 'contact part must remain inside the explicit object region'
+    assert d['role'] == 'grasp_part' and d['failure'] == 'part_outside_object'
+    assert d['object_proposed_pixels'] == 16 and d['proposed_pixels'] == 17
+    assert d['valid_pixels'] == d['anchor_pixels'] == 0
+    assert d['depth_evaluation'] == d['reference_evaluation'] == 'not_evaluated'
+    assert d['rejection_counts'] == {'part_outside_object': 1}
+    assert d['rejected_pixel_count'] == 1 and not d['samples_truncated']
+    assert d['rejected_samples'] == [{'pixel': [12, 10], 'normalized': [12/23, 10/23],
+        'reasons': ['part_outside_object']}]
+    assert_source_pixels(d, obs)
+    assert np.array_equal(mask, original_mask) and np.array_equal(part, original_part)
+    assert np.array_equal(obs.depth, original_depth)
+    # Intersecting with the object would pass. The actual overbroad proposal
+    # must continue to reject instead of quietly granting narrower permission.
+    result = GroundingResolver().reassociate_contact(obs, annotations(obs, mask, mask),
+        reference, reference, 'target', .95)
+    assert result.report['part_pixels'] == 16
+
+
+def test_subset_diagnostic_is_bounded_and_does_not_pretend_to_evaluate_bad_depth():
+    obs, xyz, mask, reference = scene()
+    part = mask.copy(); part[:8, :8] = True
+    depth = obs.depth.copy(); depth[:8, :8] = np.nan
+    bad = replace(obs, depth=depth)
+    _, d = diagnostic_for(bad, mask, reference, part_mask=part, robot_depth=np.zeros_like(depth))
+    assert d['rejected_pixel_count'] == 64 and len(d['rejected_samples']) == 12
+    assert d['samples_truncated']
+    assert d['reference_projection'] == {'kind': 'not_evaluated',
+        'bbox_normalized': None, 'intersects_image': None}
+    assert all(s['reasons'] == ['part_outside_object'] and 'depth_m' not in s
+        and 'reference_distance_m' not in s for s in d['rejected_samples'])
+    assert_source_pixels(d, bad)
+
+
+def test_containment_feedback_survives_crop_roundtrip_and_coordinate_diagnostic():
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    from view2grasp.observation_crop import crop_observation
+    obs, xyz, mask, reference = scene()
+    padding = 200
+    K = obs.K.copy(); K[:2, 2] += padding
+    obs = replace(obs, rgb=np.pad(obs.rgb, ((padding,padding),(padding,padding),(0,0))),
+        depth=np.pad(obs.depth, padding, constant_values=2.), K=K)
+    mask = np.pad(mask, padding); part = mask.copy(); part[210, 212] = True
+    crop = crop_observation(obs, reference)
+    x0, y0, x1, y1 = crop.bounds_xyxy
+    supplied = annotations(crop.observation, mask[y0:y1,x0:x1], part[y0:y1,x0:x1])
+    restored = crop.restore_decision(supplied)
+    with pytest.raises(ContactAssociationError) as caught:
+        GroundingResolver().reassociate_contact(obs, restored, reference, reference, 'target', .95)
+    d = caught.value.diagnostics
+    assert_source_pixels(d, obs)
+    assert d['rejected_samples'][0]['pixel'] == [212, 210]
+    # Match the runner's source-to-supplied-crop conversion. No rejected pixel
+    # may drift to another cell after normalization or after crop restoration.
+    feedback = json.loads(json.dumps(d))
+    feedback['coordinate_space'] = 'supplied_crop_normalized_pixel_centers'
+    feedback['image_shape_hw'] = list(crop.observation.depth.shape)
+    h, w = obs.depth.shape; ch, cw = crop.observation.depth.shape
+    for sample in feedback['rejected_samples']:
+        sample['source_pixel'] = sample.pop('pixel')
+        sample['normalized'] = ((np.array(sample['normalized'])*[w-1,h-1]-[x0,y0])/[cw-1,ch-1]).tolist()
+    diagnostic = build_annotation_diagnostic(crop.observation, feedback)
+    assert diagnostic.rejected_pixels == ((212-x0, 210-y0),)
+    assert d['reference_projection']['bbox_normalized'] is None

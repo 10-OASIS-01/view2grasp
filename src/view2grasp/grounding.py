@@ -82,6 +82,32 @@ class ContactAssociationError(ValueError):
         super().__init__(message)
 
 
+def _contact_subset_diagnostics(obs, object_mask, part_mask):
+    """Report pixel containment only, before depth/reference checks execute."""
+    h, w = obs.depth.shape
+    outside = np.argwhere(part_mask & ~object_mask)
+    count = len(outside)
+    samples = outside if count <= 12 else outside[np.linspace(0, count - 1, 12, dtype=int)]
+    return {'frame_id': int(obs.frame_id), 'camera_id': obs.camera_id,
+        'coordinate_space': 'source_image_normalized_pixel_centers',
+        'source_shape_hw': [int(h), int(w)], 'role': 'grasp_part',
+        'failure': 'part_outside_object', 'proposed_pixels': int(part_mask.sum()),
+        'object_proposed_pixels': int(object_mask.sum()),
+        # Numeric zeros preserve the bounded-repair comparison protocol. The
+        # explicit statuses distinguish unmeasured from a depth/anchor failure.
+        'valid_pixels': 0, 'anchor_pixels': 0,
+        'depth_evaluation': 'not_evaluated', 'reference_evaluation': 'not_evaluated',
+        'rejection_counts': {'part_outside_object': int(count)},
+        'rejected_pixel_count': int(count),
+        'rejected_samples': [{'pixel': [int(x), int(y)],
+            'normalized': [float(x / (w - 1)), float(y / (h - 1))],
+            'reasons': ['part_outside_object']} for y, x in samples],
+        'samples_truncated': count > len(samples),
+        'reference_projection': {'kind': 'not_evaluated',
+            'bbox_normalized': None, 'intersects_image': None},
+        'thresholds': {'part_outside_object_pixels_allowed': 0}}
+
+
 def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed,
                          accepted, xyz, depth_valid, support_clear, robot_clear,
                          robot_depth, distances, rejected_pixels, rejected_count,
@@ -389,7 +415,8 @@ class GroundingResolver:
                     mask[max(0,y-2):y+3,max(0,x-2):x+3]=False
             masks[role]=mask
         if np.any(masks['grasp_part'] & ~masks['object']):
-            raise ValueError('contact part must remain inside the explicit object region')
+            raise ContactAssociationError('contact part must remain inside the explicit object region',
+                _contact_subset_diagnostics(obs,masks['object'],masks['grasp_part']))
         h,w=obs.depth.shape;v,u=np.mgrid[:h,:w]
         xyz=unproject(np.stack([u,v],-1),obs.depth,obs.K,obs.T_wc)
         depth_valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)&np.isfinite(xyz).all(axis=2)

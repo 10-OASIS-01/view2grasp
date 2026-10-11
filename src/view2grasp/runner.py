@@ -138,6 +138,17 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
             annotation_request=copy.deepcopy(history[-1]['contact_reassociation'])
             previous_diagnostics=None;annotation_diagnostic=None
+            if crop is not None:
+                # Small distant targets may occupy only a few raw pixels.
+                # Supply a coordinate-labelled magnification from the first
+                # annotation, without adding scene evidence or semantic suggestions.
+                annotation_diagnostic=build_annotation_diagnostic(annotation_observation,{
+                    'frame_id':observation.frame_id,'camera_id':observation.camera_id,
+                    'coordinate_space':'supplied_crop_normalized_pixel_centers',
+                    'image_shape_hw':list(annotation_observation.depth.shape),
+                    'rejected_samples':[]})
+                event('contact_annotation_diagnostic',frame_id=observation.frame_id,
+                    repair=0,provenance=annotation_diagnostic.provenance())
             for repair in range(3):
                 try:
                     annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
@@ -285,11 +296,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     surface_points=np.array([g.surface_point for g in candidates]),grasp_centers=np.array([g.grasp_center for g in candidates]),
                     grasp_center_offset=robot.grasp_center_offset())
                 planning_rng_state=copy.deepcopy(planner.rng.bit_generator.state)
-                chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,time_budget=config.planning_seconds)
+                chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
+                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
                 candidate_search_completed=True
                 (out/f'planning_diagnostic_{obs.frame_id:03d}.json').write_text(json.dumps({
                     'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
                     'closest_by_failure':planner.closest_by_failure,
+                    'geometry_ranking':getattr(planner,'geometry_ranking',None),
                     'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
                 feedback=planner.last_failure if chosen is None else "planned"
             except ValueError as exc:
@@ -442,12 +455,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # fresh random elbow branch creates new unseen space.
                     planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                     chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
-                        time_budget=config.planning_seconds)
+                        time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
                     record.planning_seconds+=time.monotonic()-retry_timer
                     retry_feedback=planner.last_failure if chosen is None else "planned"
                     (out/f'planning_diagnostic_{obs.frame_id:03d}_recovery.json').write_text(json.dumps({
                         'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
                         'closest_by_failure':planner.closest_by_failure,
+                        'geometry_ranking':getattr(planner,'geometry_ranking',None),
                         'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
                     event("recovery_planning",feedback=retry_feedback,checks=planner.checks,
                         preserved_grounding_frame=decision.frame_id)
@@ -488,12 +502,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                 residual_timer=time.monotonic()
                                 planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                                 chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
-                                    time_budget=config.planning_seconds)
+                                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
                                 record.planning_seconds+=time.monotonic()-residual_timer
                                 residual_feedback=planner.last_failure if chosen is None else 'planned'
                                 (out/f'planning_diagnostic_{obs.frame_id:03d}_residual.json').write_text(json.dumps({
                                     'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
                                     'closest_by_failure':planner.closest_by_failure,
+                                    'geometry_ranking':getattr(planner,'geometry_ranking',None),
                                     'recovery_unknown_points':len(planner.recovery_unknown()),'checks':planner.checks},indent=2))
                                 event('retry_recovery_planning',feedback=residual_feedback,checks=planner.checks,
                                     preserved_grounding_frame=decision.frame_id)

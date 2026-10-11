@@ -198,6 +198,24 @@ class RobotModel:
         if not np.isfinite(result).all():raise ValueError('nonfinite robot boundary proxy')
         return result
 
+    def gripper_local_points(self,q,gripper=None):
+        """Known gripper collision samples in TCP coordinates, with pad labels.
+
+        The gripper's own joints stay fixed at the requested proprioceptive
+        opening. Scene geometry and arm samples cannot enter this rigid proxy.
+        """
+        saved=self.data.qpos.copy()
+        try:
+            points,pads=self.points(q,gripper);p,R=self.pose();indices=[];start=0
+            for _,local,_,name in self.parts:
+                if name.startswith('gripper'):
+                    indices.extend(range(start,start+len(local)))
+                start+=len(local)
+            return (points[indices]-p)@R,pads[indices].copy()
+        finally:
+            self.data.qpos[:]=saved
+            mujoco.mj_forward(self.model,self.data)
+
     def contact_zone(self,points,tolerance=.002):
         result=np.zeros(len(points),dtype=bool)
         for gid,_,pad,_ in self.parts:
@@ -300,6 +318,7 @@ class Planner:
         self.failure_counts=Counter();self.best_bad=100000;self.best_unknown=None
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
         self.payload_invalid=None
+        self.geometry_ranking={}
 
     def begin_payload_lift(self):
         """Record the observation-derived attachment pose for vertical lift."""
@@ -491,24 +510,66 @@ class Planner:
             path.append(q)
         return np.array(path)
 
-    def choose(self,q,candidates,max_candidates=48,time_budget=120):
+    def choose(self,q,candidates,max_candidates=48,time_budget=120,*,prioritize_gripper_geometry=False):
         # Diagnostics and targeted next-view advice describe this planning
         # attempt only. Keeping an earlier one-point miss would send recovery
         # toward a region that a later observation may already have revealed.
         self.last_failure="";self.last_bad=0;self.best_bad=100000
         self.best_unknown=None;self.closest_invalid=None;self.closest_by_failure={};self.failure_counts=Counter()
         self.unknown_samples=[];self.unknown_sample_count=0
+        self.geometry_ranking={}
         self.deadline=time.monotonic()+time_budget
-        try:return self._choose(q,candidates,max_candidates)
+        try:return self._choose(q,candidates,max_candidates,prioritize_gripper_geometry)
         except PlanningBudgetExceeded:
             cause="unknown space" if len(self.recovery_unknown()) else self.last_failure
             self.last_failure="planning budget exhausted: "+cause
             return None
         finally:self.deadline=None
 
-    def _choose(self,q,candidates,max_candidates):
+    def _geometry_priority(self,q,candidates):
+        """Rank nominally unobstructed grippers first; never approve or reject IK.
+
+        A known obstacle later on the approach can be hidden by an earlier arm
+        UNKNOWN rejection. This cheap rigid proxy considers every original
+        candidate before the fixed search subset is selected. UNKNOWN remains
+        unverified; all normal robot, map and path checks still run afterward.
+        """
+        started=time.monotonic();preferred=[]
+        info={'input_candidates':len(candidates),'checked_candidates':0,
+            'nominal_clear_candidates':0,'nominal_blocked_candidates':0,
+            'incomplete_candidates':len(candidates),'status':'unavailable',
+            'scope':'ordering only; no observed gripper obstacle is not a free-space certificate',
+            'precheck_seconds':0.}
+        self.geometry_ranking=info
+        if not hasattr(self.robot,'gripper_local_points'):return preferred
+        try:
+            if self.deadline is not None and time.monotonic()>=self.deadline:
+                info['status']='time_budget';return preferred
+            local,pads=self.robot.gripper_local_points(q,self.gripper)
+            info['gripper_samples']=len(local)
+            if not len(local):return preferred
+            info['status']='complete'
+            for g in candidates:
+                blocked=False
+                for offset in np.linspace(.08,0,17):
+                    if self.deadline is not None and time.monotonic()>=self.deadline:
+                        info['status']='time_budget';return preferred
+                    points=local@g.rotation.T+g.position-g.approach*offset
+                    state=self.map.classify(points).copy()
+                    if offset<.012:
+                        allowed=self.map.contact_allowed(points) if hasattr(self.map,'contact_allowed') else self.map.is_target(points)
+                        state[pads&allowed]=FREE
+                    if np.any(state==OCCUPIED):blocked=True;break
+                info['checked_candidates']+=1
+                info['incomplete_candidates']-=1
+                if blocked:info['nominal_blocked_candidates']+=1
+                else:preferred.append(g);info['nominal_clear_candidates']+=1
+            return preferred
+        finally:info['precheck_seconds']=time.monotonic()-started
+
+    @staticmethod
+    def _candidate_subset(candidates,current_R,max_candidates):
         # Favor the equivalent gripper orientation closest to the current wrist.
-        _,current_R=self.robot.pose(q)
         candidates=sorted(candidates,key=lambda g:.08*g.score+np.linalg.norm(Rotation.from_matrix(g.rotation@current_R.T).as_rotvec()))
         if len(candidates)>max_candidates:
             # Candidates occur in three insertion depths per orientation. Use
@@ -530,6 +591,26 @@ class Planner:
                 selected.append(remaining.pop(int(np.argmax(score))))
             candidates=[g for group in selected for g in group[1]][:max_candidates]
         else:candidates=candidates[:max_candidates]
+        return candidates
+
+    def _choose(self,q,candidates,max_candidates,prioritize_gripper_geometry=False):
+        candidates=list(candidates)
+        _,current_R=self.robot.pose(q)
+        preferred=(self._geometry_priority(q,candidates) if prioritize_gripper_geometry else [])
+        if not prioritize_gripper_geometry:self.geometry_ranking={'status':'disabled'}
+        if self.deadline is not None and time.monotonic()>=self.deadline:
+            self.last_failure='candidate geometry ranking';raise PlanningBudgetExceeded
+        # Preserve the original diverse fallback, including nominally blocked
+        # poses: tolerated IK error can make their actual geometry different.
+        # A nominal proxy is only a search priority, never a hard safety result.
+        first=self._candidate_subset(preferred,current_R,max_candidates)
+        fallback=self._candidate_subset(candidates,current_R,max_candidates)
+        seen={id(g) for g in first}
+        selected=(first+[g for g in fallback if id(g) not in seen])[:max_candidates]
+        indices={id(g):i for i,g in enumerate(candidates)}
+        self.geometry_ranking['selected_priority_candidates']=len(first)
+        self.geometry_ranking['selected_candidate_indices']=[indices[id(g)] for g in selected]
+        candidates=selected
         for g in candidates:
             pre=g.position-g.approach*.08
             for attempt in range(8):
