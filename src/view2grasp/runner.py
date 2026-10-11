@@ -24,6 +24,7 @@ from .placement import tabletop_placement
 from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
 from .object_annotation import annotate_source_object
 from .payload_registration import register_payload_source,PayloadRegistrationError
+from .postclose_preview import LiftEvidence,setup_lift_attachment,preview_lift
 
 
 _MUG_REFINEMENT_INSTRUCTION=(
@@ -809,6 +810,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     if current_ownership else np.empty((0,3)))
             def measured_contact_points():
                 return np.vstack(current_contact_evidence) if current_contact_evidence else np.empty((0,3))
+            def current_lift_evidence():
+                return LiftEvidence(target,target_part,semantic_contact_only,
+                    current_ownership=tuple(current_ownership),contact_points=measured_contact_points(),
+                    source_ownership=source_ownership,source_observation=source_observation,
+                    registered_source_points=(None if registered_source is None else
+                        registered_source.transformed_source_points))
             def register_owned(frame_id):
                 nonlocal ownership_perception_seconds
                 if source_ownership is None:return None
@@ -890,47 +897,67 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # and any post-lift reserve remain fixed; no extra images appear.
             max_post_views=(post_limit-record.observations if ownership_enabled else reserve_after_close)
             while record.observations<post_limit and post_index<max_post_views:
+                strict_preview=None
+                if ownership_enabled and post_index:
+                    preview_timer=time.monotonic()
+                    try:
+                        strict_preview=preview_lift(planner,current_lift_evidence(),sim.q,sim.gripper_q)
+                    finally:record.planning_seconds+=time.monotonic()-preview_timer
+                    (out/f'postclose_lift_preview_{obs.frame_id:03d}.json').write_text(
+                        json.dumps(strict_preview.report,indent=2))
+                    event('postclose_strict_lift_preview',frame_id=obs.frame_id,**strict_preview.report)
+                    # No acquired image is spent on invented free-space need.
+                    # OCC, IK failure and incomplete previews still proceed to
+                    # the unchanged full final lift planner, never execution.
+                    if not strict_preview.report['mapping_evidence_available']:break
                 coverage_payload=np.vstack([target,measured_owned_points(),measured_contact_points()])
-                if source_ownership is not None:
-                    # Historical source pose is a visibility hypothesis until
-                    # current measured geometry supports a rigid registration.
+                if source_ownership is not None and (strict_preview is None or registered_source is not None):
+                    # The first view retains the original visibility hypothesis.
+                    # Strict later previews carry historical source geometry
+                    # only after an accepted current measured registration.
                     hypothesis=(registered_source.transformed_source_points if registered_source is not None
                         else source_ownership.object_points)
                     coverage_payload=np.vstack([coverage_payload,hypothesis])
-                sweep=np.vstack([coverage_payload+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
-                sweep_unknown=sweep[map_.classify(sweep)==0]
-                leading=leading_shell(sweep_unknown,map_.resolution)
-                # Weight the leading boundary: it enters new space first. The
-                # rest of the sweep remains represented once, but cannot drown
-                # out the thin top shell in a tall handled object.
-                advice_points=np.vstack([sweep_unknown,np.repeat(leading,4,axis=0)]) if len(leading) else sweep_unknown
-                # Also predict the arm's vertical-lift sweep using only known
-                # kinematics. Payload-only view selection can leave a wrist or
-                # elbow surface just behind the currently observed robot.
-                lift_robot=[];preview_q=sim.q.copy()
-                for dz in np.linspace(.01,.13,14):
-                    preview=robot.ik(p+[0,0,dz],R,preview_q)
-                    if preview is None:break
-                    lift_robot.append(robot.points(preview,sim.gripper_q)[0]);preview_q=preview
-                if lift_robot:
-                    robot_sweep=np.vstack(lift_robot)
-                    robot_unknown=robot_sweep[map_.classify(robot_sweep)==0]
-                    if len(robot_unknown):
-                        _,robot_unique=np.unique(np.round(robot_unknown/map_.resolution).astype(np.int32),axis=0,return_index=True)
-                        robot_unknown=robot_unknown[robot_unique]
-                else:robot_unknown=np.empty((0,3))
-                if (post_index and not len(sweep_unknown) and not len(robot_unknown)
-                        and (task!='occluded' or post_association)):break
+                if strict_preview is not None:
+                    sweep_unknown=strict_preview.payload_unknown
+                    robot_unknown=strict_preview.robot_unknown
+                    leading=leading_shell(sweep_unknown,map_.resolution)
+                    advice_points=np.vstack([sweep_unknown,np.repeat(leading,4,axis=0)]) if len(leading) else sweep_unknown
+                else:
+                    sweep=np.vstack([coverage_payload+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
+                    sweep_unknown=sweep[map_.classify(sweep)==0]
+                    leading=leading_shell(sweep_unknown,map_.resolution)
+                    # Weight the leading boundary: it enters new space first. The
+                    # rest of the sweep remains represented once, but cannot drown
+                    # out the thin top shell in a tall handled object.
+                    advice_points=np.vstack([sweep_unknown,np.repeat(leading,4,axis=0)]) if len(leading) else sweep_unknown
+                    # Also predict the arm's vertical-lift sweep using only known
+                    # kinematics. Payload-only view selection can leave a wrist or
+                    # elbow surface just behind the currently observed robot.
+                    lift_robot=[];preview_q=sim.q.copy()
+                    for dz in np.linspace(.01,.13,14):
+                        preview=robot.ik(p+[0,0,dz],R,preview_q)
+                        if preview is None:break
+                        lift_robot.append(robot.points(preview,sim.gripper_q)[0]);preview_q=preview
+                    if lift_robot:
+                        robot_sweep=np.vstack(lift_robot)
+                        robot_unknown=robot_sweep[map_.classify(robot_sweep)==0]
+                        if len(robot_unknown):
+                            _,robot_unique=np.unique(np.round(robot_unknown/map_.resolution).astype(np.int32),axis=0,return_index=True)
+                            robot_unknown=robot_unknown[robot_unique]
+                    else:robot_unknown=np.empty((0,3))
+                    if (post_index and not len(sweep_unknown) and not len(robot_unknown)
+                            and (task!='occluded' or post_association)):break
                 current_obs=replace(obs,q=sim.q.copy(),gripper_q=sim.gripper_q.copy())
                 # Whole-arm safety is a hard priority: a high payload point
                 # count must not sacrifice even one unseen wrist sample. Use
                 # payload leading surfaces and target visibility only to break
                 # ties among views that cover the robot sweep.
                 # The exact samples rejected by the interpolated IK path take
-                # precedence on the first post-grasp view.  Later iterations
-                # fall back to the recomputed kinematic sweep after the map has
-                # changed.
-                exact_unknown=preview_unknown
+                # precedence on the first post-grasp view. Opt-in later views
+                # use the strict attachment snapshot; legacy tasks retain
+                # their recomputed kinematic sweep after the map has changed.
+                exact_unknown=preview_unknown if strict_preview is None else strict_preview.robot_unknown
                 required_points=exact_unknown if len(exact_unknown) else robot_unknown
                 # First satisfy every coverable whole-arm sample; then rank
                 # those views by the carried object's leading lift sweep. This
@@ -948,16 +975,25 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # not make the camera model see through its observed surfaces.
                 # This local union changes visibility ranking only; it never
                 # reintroduces static obstacles or certifies UNKNOWN as free.
-                advice_occluders=np.vstack([map_.surface,coverage_payload])
+                advice_surface=map_.surface if strict_preview is None else strict_preview.surface
+                advice_occluders=np.vstack([advice_surface,coverage_payload])
                 payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
                     focus_points=focus_for_advice,observed_points=advice_occluders,
                     required_points=required_points if len(required_points) else None,
                     semantic_focus=target if task=='occluded' else None)
                 payload_advice['occlusion_evidence']={
                     'basis':'static_surface_plus_observed_payload_reference',
-                    'static_surface_points':len(map_.surface),'payload_reference_points':len(target),
+                    'static_surface_points':len(advice_surface),'payload_reference_points':len(target),
                     'scope':'Visibility prediction only; observed references do not certify current visibility.',
                     'visibility_prediction_tolerance_unchanged':True}
+                if strict_preview is not None:
+                    payload_advice['strict_lift_evidence']={
+                        'source_frame_id':obs.frame_id,
+                        'robot_unknown_points':len(strict_preview.robot_unknown),
+                        'payload_unknown_points':len(strict_preview.payload_unknown),
+                        'occupied_unresolved':strict_preview.report['occupied_unresolved'],
+                        'incomplete':strict_preview.report['incomplete'],
+                        'scope':'Strict rejected UNKNOWN samples only. Observed obstacles and retained endpoints remain independently unresolved; this advice cannot authorize motion.'}
                 if ownership_enabled:
                     payload_advice['source_ownership_coverage']={
                         'actual_current_owned_points':len(measured_owned_points()),
@@ -1047,49 +1083,35 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         robot_lift_unknown_points=len(robot_unknown))
                 # Close the loop: score a second view from what remains unknown
                 # after the first *actual* RGB-D integration.
-                preview_unknown=classify_preview_sweep()
-                event('postgrasp_residual',rejected_unknown_points=len(preview_unknown),
-                    postgrasp_view_index=post_index+1)
+                if not ownership_enabled:
+                    preview_unknown=classify_preview_sweep()
+                    event('postgrasp_residual',rejected_unknown_points=len(preview_unknown),
+                        postgrasp_view_index=post_index+1)
                 post_index+=1
             if task=='occluded' and not post_association:
                 raise RuntimeError('execution: post-close object/part association unverified; lift blocked')
             p,R=robot.pose(sim.q)
-            planner.attached=(target-p)@R
-            planner.observed_payload_local=None
-            planner.registered_payload_local=None
-            attached_part=(target_part-p)@R
-            planner.attached_contact_local=attached_part.copy() if semantic_contact_only else None
+            if ownership_enabled:
+                attachment=setup_lift_attachment(planner,map_,p,R,current_lift_evidence())
+                attached_part=attachment.attached_part
+                actual_payload_source=attachment.actual_source_points
+                for retirement in attachment.retirements:
+                    event(retirement['kind'],**{key:value for key,value in retirement.items() if key!='kind'})
+                np.save(out/'payload_actual_source_points.npy',actual_payload_source)
+                if registered_source is not None:np.save(out/'payload_registered_points.npy',registered_source.transformed_source_points)
+            else:
+                # Preserve the default block/occluded and legacy mug setup.
+                planner.attached=(target-p)@R
+                planner.observed_payload_local=None
+                planner.registered_payload_local=None
+                attached_part=(target_part-p)@R
+                planner.attached_contact_local=attached_part.copy() if semantic_contact_only else None
+                map_.set_payload_source(target)
+                map_.remove_target_endpoints(target)
+                planner.begin_payload_lift()
             if semantic_contact_only:np.save(out/'payload_contact_points.npy',target_part)
             np.save(out/'payload_source_points.npy',target)
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
-            actual_payload_source=target
-            if ownership_enabled:
-                # Both strict semantic transactions supply measured collision
-                # and source surfaces, separate from the permitted part. Only
-                # the ownership transaction authorizes exact retirement below.
-                measured_current=np.vstack([measured_owned_points(),measured_contact_points()])
-                if len(measured_current):
-                    planner.add_observed_payload(measured_current,p,R)
-                    actual_payload_source=np.vstack([actual_payload_source,measured_current])
-                # The last camera-only update already fitted these exact
-                # inputs. No physics or target update occurred since that fit.
-                if registered_source is not None:
-                    predicted=registered_source.transformed_source_points
-                    planner.registered_payload_local=(predicted-p)@R
-                    # ONLY the original measured source points enter this
-                    # certificate. Registered predictions cannot certify FREE.
-                    actual_payload_source=np.vstack([actual_payload_source,source_ownership.object_points])
-                    removed=map_.retire_owned_source(source_ownership,source_observation)
-                    event('source_object_retired',frame_id=source_observation.frame_id,
-                        exact_endpoints=removed,registered_collision_points=len(predicted))
-                for current_owned,current_source in current_ownership:
-                    removed=map_.retire_owned_source(current_owned,current_source)
-                    event('current_object_retired',frame_id=current_source.frame_id,exact_endpoints=removed)
-                np.save(out/'payload_actual_source_points.npy',actual_payload_source)
-                if registered_source is not None:np.save(out/'payload_registered_points.npy',registered_source.transformed_source_points)
-            map_.set_payload_source(actual_payload_source)
-            map_.remove_target_endpoints(target)
-            planner.begin_payload_lift()
             # Lift diagnostics must describe this phase, not the rejected
             # pregrasp branches retained from the preceding candidate search.
             planner.closest_by_failure={};planner.closest_invalid=None;planner.payload_invalid=None

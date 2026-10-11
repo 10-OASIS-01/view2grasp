@@ -183,6 +183,22 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             'coverage': np.asarray(args[2]).copy(), 'static_surface': evidence.map.surface.copy()})
         return {'views': [[0., 55., .8]]}
 
+    def preview(planner, payload, start, gripper):
+        # This fixture exercises ownership/registration lifecycles, with its
+        # original synthetic coverage schedule. Real strict geometry, map
+        # isolation and restoration are tested in test_postclose_preview.
+        from view2grasp.postclose_preview import LiftPreview
+        carried = [payload.target, payload.contact_points]
+        carried.extend(owned.object_points for owned, _ in payload.current_ownership)
+        if payload.registered_source_points is not None:
+            carried.append(payload.registered_source_points)
+        covered = complete_lift and max_observations > 4 and len(evidence.map.views) >= 4
+        unknown = np.empty((0, 3)) if covered else np.vstack(carried) + [0., 0., .13]
+        return LiftPreview(np.empty((0, 3)), unknown,
+            {'mapping_evidence_available': bool(len(unknown)),
+                'occupied_unresolved': False, 'incomplete': not covered},
+            evidence.map.surface.copy())
+
     monkeypatch.setattr(runner, 'Simulator', Sim)
     monkeypatch.setattr(runner, 'RobotModel', Robot)
     monkeypatch.setattr(runner, 'DepthMap', Map)
@@ -199,6 +215,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     monkeypatch.setattr(runner, 'cloud', lambda obs: original)
     monkeypatch.setattr(runner, 'fit_table', lambda *args: .9)
     monkeypatch.setattr(runner, 'suggest_views', advice)
+    monkeypatch.setattr(runner, 'preview_lift', preview)
     monkeypatch.setattr(runner, 'nominal_grasp', lambda *args: None)
     monkeypatch.setattr(runner, 'time_parameterize', lambda path: path)
     monkeypatch.setattr(runner, 'save_observation', lambda *args: None)

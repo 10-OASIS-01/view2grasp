@@ -328,6 +328,7 @@ class Planner:
         self.failure_counts=Counter();self.best_bad=100000;self.best_unknown=None
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
         self.payload_invalid=None
+        self.last_validation=None
         self.geometry_ranking={}
         self._geometry_time_budget=8.
 
@@ -362,11 +363,28 @@ class Planner:
         return points[index]
 
     def valid(self,q,contact=False):
+        # Per-call effective refusals, after the ordinary contact/source rules.
+        # Keep this separate from historical closest-branch diagnostics.
+        self.last_validation={'q':np.asarray(q).tolist(),'complete':False,'valid':None,
+            'failure':'','robot_unknown_points':[],'robot_occupied_points':[],
+            'payload_unknown_points':[],'payload_occupied_points':[],
+            'robot_unknown_count':0,'robot_occupied_count':0,
+            'payload_unknown_count':0,'payload_occupied_count':0,
+            'sample_limit_per_state':200}
+        def finish(value):
+            self.last_validation.update(complete=True,valid=bool(value),
+                failure='' if value else self.last_failure)
+            return value
+        def record_states(prefix,points,state):
+            for label,code in (('unknown',UNKNOWN),('occupied',OCCUPIED)):
+                selected=points[state==code]
+                self.last_validation[f'{prefix}_{label}_count']=len(selected)
+                self.last_validation[f'{prefix}_{label}_points']=selected[:200].tolist()
         if self.deadline is not None and time.monotonic()>self.deadline:raise PlanningBudgetExceeded
         self.checks+=1
         if np.any(q<self.robot.limits[:,0]) or np.any(q>self.robot.limits[:,1]):
             self.last_bad=100000
-            self.last_failure="joint limits"; return False
+            self.last_failure="joint limits"; return finish(False)
         pts,pads=self.robot.points(q,self.gripper)
         # Actual robot self contacts in the independent robot-only model.
         for c in self.robot.data.contact:
@@ -374,7 +392,7 @@ class Planner:
                 b1=self.robot.model.geom_bodyid[c.geom1]; b2=self.robot.model.geom_bodyid[c.geom2]
                 if b1!=b2 and self.robot.model.body_parentid[b1]!=b2 and self.robot.model.body_parentid[b2]!=b1:
                     self.last_bad=100000
-                    self.last_failure="self collision"; return False
+                    self.last_failure="self collision"; return finish(False)
         state=self.map.classify(pts)
         target_hit=np.zeros(len(pts),dtype=bool)
         if contact:
@@ -391,6 +409,7 @@ class Planner:
             # Removing the held object's old endpoints leaves static obstacles
             # intact. Never waive a remaining observed obstacle near the payload.
             state[pads & touching & (state!=OCCUPIED)]=FREE
+        record_states('robot',pts,state)
         bad=state!=FREE
         unknown_points=pts[state==UNKNOWN]
         if len(unknown_points) and self.unknown_sample_count<5000:
@@ -415,13 +434,13 @@ class Planner:
                 self.closest_by_failure[self.last_failure]={'count':self.last_bad,
                     'q':np.asarray(q).tolist(),'points':pts[bad][:100].tolist(),
                     'unknown':int(np.sum(state==UNKNOWN))}
-            return False
+            return finish(False)
         if self.attached is not None:
             p,R=self.robot.pose()
             payload_local=self.payload_collision_local()
             held=payload_local@R.T+p
             if hasattr(self.robot,'payload_intersects_noncontact_robot') and self.robot.payload_intersects_noncontact_robot(held):
-                self.last_failure='carried object intersects non-contact robot';return False
+                self.last_failure='carried object intersects non-contact robot';return finish(False)
             state=self.map.classify(held)
             # Sparse source surfaces certify only nearby UNKNOWN cells vacated
             # by the moving payload; observed occupied cells are never waived.
@@ -441,12 +460,16 @@ class Planner:
                 state[lift_shadow & (state==UNKNOWN)]=FREE
             if self.allow_payload_support and hasattr(self.map,'support_contact_allowed'):
                 state[(state==OCCUPIED)&self.map.support_contact_allowed(held)]=FREE
+            record_states('payload',held,state)
             if np.any(state!=FREE):
                 bad=state!=FREE
                 bad_points=held[bad][:200]
-                self.payload_invalid={'unknown':int(np.sum(state==UNKNOWN)),
+                self.payload_invalid={'q':np.asarray(q).tolist(),
+                    'unknown':int(np.sum(state==UNKNOWN)),
                     'occupied':int(np.sum(state==OCCUPIED)),
                     'points':bad_points.tolist(),
+                    'point_states':state[bad][:200].tolist(),
+                    'payload_point_indices':np.flatnonzero(bad)[:200].tolist(),
                     'free_margin':(self.map.free_margin(bad_points).tolist()
                         if hasattr(self.map,'free_margin') else [])}
                 if lift_source is not None:
@@ -456,8 +479,8 @@ class Planner:
                         lift_shadow=lift_shadow[bad][:200].tolist())
                 self.last_failure=("carried object unknown space" if np.any(state==UNKNOWN)
                     else "carried object observed obstacle")
-                return False
-        return True
+                return finish(False)
+        return finish(True)
 
     def feasible_ik(self,position,rotation,seed,contact=False,connected=False):
         q=self.robot.ik(position,rotation,seed)

@@ -115,9 +115,16 @@ def run_contact_lifecycle(tmp_path, monkeypatch, *, object_seeds, explicit_part,
     def annotate(*args, **kwargs):
         e.annotations.append(args[1].frame_id)
         return SimpleNamespace(ownership=None, report={'semantic_requests': 1, 'vlm_calls': 0})
+    def preview(*args, **kwargs):
+        from view2grasp.postclose_preview import LiftPreview
+        points = np.zeros((1, 3)) if len(e.map.views) < 4 else np.empty((0, 3))
+        return LiftPreview(points, np.empty((0, 3)),
+            {'mapping_evidence_available':bool(len(points)), 'occupied_unresolved':False, 'incomplete':True},
+            e.map.surface.copy())
 
     for name, value in (('Simulator', Sim), ('RobotModel', Robot), ('DepthMap', Map),
-            ('Planner', Plan), ('VLM', Decisions), ('annotate_source_object', annotate)):
+            ('Planner', Plan), ('VLM', Decisions), ('annotate_source_object', annotate),
+            ('preview_lift', preview)):
         monkeypatch.setattr(runner, name, value)
     monkeypatch.setattr(runner.GroundingResolver, 'from_config', lambda config: Resolver())
     monkeypatch.setattr(runner, 'Evaluator', lambda sim: SimpleNamespace(result=lambda: {

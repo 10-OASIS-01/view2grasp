@@ -22,7 +22,7 @@ def contains(points,other):
 
 
 def run_case(tmp_path,monkeypatch,*,mode='first_success',ownership=True,preclose_recovery=False,
-             owned=True):
+             owned=True,strict_preview_override=None,expected_observations=None):
     from view2grasp import runner,recording
     obs,xyz,object_mask,original=scene()
     initial_part=np.zeros_like(object_mask);initial_part[10:14,8:10]=True
@@ -36,7 +36,7 @@ def run_case(tmp_path,monkeypatch,*,mode='first_success',ownership=True,preclose
         surface_point=original[0],grasp_center=original[0])
     e=SimpleNamespace(events=[],requests=[],association_calls=[],targets=[],advice=[],
         retired=[],removals=[],certificates=[],observations=[],physical_steps=0,
-        ownership_frames=[],original=original,measured=measured,allowed_part=allowed_part,
+        ownership_frames=[],previews=[],final_lift_checks=[],original=original,measured=measured,allowed_part=allowed_part,
         extra=extra,position=position,rotation=rotation)
 
     class Sim:
@@ -104,7 +104,8 @@ def run_case(tmp_path,monkeypatch,*,mode='first_success',ownership=True,preclose
         def recovery_unknown(self):return original[:1] if preclose_recovery else np.empty((0,3))
         def begin_payload_lift(self):pass
         def end_payload_lift(self):pass
-        def feasible_ik(self,*args,**kwargs):self.last_failure='strict test lift stop';return None
+        def feasible_ik(self,*args,**kwargs):
+            e.final_lift_checks.append(kwargs);self.last_failure='strict test lift stop';return None
 
     class Decisions:
         def __init__(self,*args,**kwargs):
@@ -158,12 +159,25 @@ def run_case(tmp_path,monkeypatch,*,mode='first_success',ownership=True,preclose
     def register(*args):raise PayloadRegistrationError('test registration abstention',{'accepted':False})
     def advice(*args,**kwargs):
         e.advice.append({'phase':e.sim.phase,'coverage':np.array(args[2]),
+            'required':copy.deepcopy(kwargs.get('required_points')),
             'occluders':kwargs.get('observed_points',np.empty((0,3))).copy()})
         return {'views':[[0.,55.,.8]]}
+    def strict_preview(planner,evidence,start,gripper):
+        from view2grasp.postclose_preview import LiftPreview
+        e.previews.append({'frame':e.sim.frame,'phase':e.sim.phase,'steps':e.physical_steps,
+            'evidence':evidence,'start':start.copy(),'gripper':gripper.copy()})
+        if strict_preview_override is not None:
+            return strict_preview_override(e,planner,evidence,start,gripper)
+        # This fixture tests annotation lifecycles, not geometry. Dedicated
+        # preview tests exercise the real Planner/DepthMap policy and isolation.
+        return LiftPreview(np.zeros((1,3)),e.measured+[0.,0.,.13],
+            {'mapping_evidence_available':True,'occupied_unresolved':False,'incomplete':True},
+            e.map.surface.copy())
     def no_crop(*args,**kwargs):raise ValueError('test uses the original acquired image')
     for name,value in [('Simulator',Sim),('RobotModel',Robot),('DepthMap',Map),('Planner',Plan),
             ('VLM',Decisions),('annotate_source_object',annotate),('register_payload_source',register),
-            ('suggest_views',advice),('crop_observation',no_crop)]:monkeypatch.setattr(runner,name,value)
+            ('suggest_views',advice),('crop_observation',no_crop),
+            ('preview_lift',strict_preview)]:monkeypatch.setattr(runner,name,value)
     monkeypatch.setattr(runner.GroundingResolver,'from_config',lambda config:resolver)
     monkeypatch.setattr(runner,'Evaluator',lambda sim:SimpleNamespace(result=lambda:{
         'success':False,'collision':False,'first_grasp_success':False,'collision_free_success':False}))
@@ -180,7 +194,8 @@ def run_case(tmp_path,monkeypatch,*,mode='first_success',ownership=True,preclose
     result=runner.run_episode('mug',3,'active',tmp_path,replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=maximum,source_object_ownership=ownership))
     assert result['failure']=='planning: lift strict test lift stop'
-    assert result['observations']==maximum and result['attempts']==1
+    assert result['observations']==(maximum if expected_observations is None else expected_observations)
+    assert result['attempts']==1
     assert not result['success'] and not result['online']
     e.result=result;e.output=tmp_path/'mug_active_0003'
     return e
