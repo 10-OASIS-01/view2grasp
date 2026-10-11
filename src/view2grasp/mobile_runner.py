@@ -85,7 +85,25 @@ def support_plane(points,anchor=None):
     return float(np.median(selected[:,2])),selected
 
 
-def navigation_observation_context(obs,observed_points,robot_depth=None):
+def navigation_floor(points,robot_boundary):
+    """Fit measured floor near the known standing robot's lowest boundary.
+
+    The robot model supplies a height prior, never unseen floor points. A view
+    containing only a countertop must not make that support surface navigable.
+    """
+    boundary=np.asarray(robot_boundary,dtype=float)
+    if (boundary.ndim!=2 or boundary.shape[1]!=3 or not len(boundary) or
+            not np.isfinite(boundary).all()):
+        raise ValueError('grounding: navigation floor needs a finite known robot boundary')
+    lowest=float(boundary[:,2].min())
+    observed=np.asarray(points)
+    observed=observed[np.isfinite(observed).all(axis=1)&(np.abs(observed[:,2]-lowest)<=.06)]
+    try:return support_plane(observed)
+    except ValueError as exc:
+        raise ValueError('grounding: navigation floor unobserved near robot bottom; observe robot0_nav_floor before moving') from exc
+
+
+def navigation_observation_context(obs,observed_points,robot_depth=None,*,robot_boundary):
     """Bounded current-image floor evidence; no destination or path oracle."""
     context={'frame_id':obs.frame_id,'camera_id':obs.camera_id,'floor_samples':[],
         'evidence_scope':'Measured floor height only; samples do not establish robot clearance, reachability, or destination identity.',
@@ -95,7 +113,7 @@ def navigation_observation_context(obs,observed_points,robot_depth=None):
             'Use current-frame groundings only; old-frame pixel coordinates cannot be reused. '
             'Prefer a floor region when a precise point is uncertain. Preserve an observation to verify arrival '
             'and use finish when the task appears complete; movement alone is not success.')}
-    try:floor_z,_=support_plane(observed_points)
+    try:floor_z,_=navigation_floor(observed_points,robot_boundary)
     except ValueError as exc:
         context['floor_evidence_unavailable']=str(exc)
         return context
@@ -333,8 +351,8 @@ def run_mobile_episode(task,seed,strategy,root,config):
                                 'payload_evidence':evidence})
 
         def nav_planner():
-            floor_z,floor=support_plane(navmap.surface)
             world=robot.boundary_points(sim.q,sim.gripper_q)
+            floor_z,floor=navigation_floor(navmap.surface,world)
             # Match the 2 cm navigation lattice while preserving volumetric coverage.
             _,indices=np.unique(np.round(world/.02).astype(np.int32),axis=0,return_index=True)
             world=world[indices]
@@ -451,7 +469,8 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 'payload_state':'empty' if payload is None else payload.state,'base_pose':sim.base_pose.tolist(),
                 'feedback':'Navigate using visible floor goals. Base motion is limited to 25 cm before observing again. Grasp only when target is reachable; place only when holding.'})
             if task=='NavigateKitchen':
-                history[-1]['navigation_context']=navigation_observation_context(obs,navmap.surface,self_depth)
+                history[-1]['navigation_context']=navigation_observation_context(obs,navmap.surface,self_depth,
+                    robot_boundary=robot.boundary_points(obs.q,obs.gripper_q))
             elif phase=='find_object' and payload is None and framing.target is not None:
                 # Predict framing from the last explicit object grounding and
                 # current robot-mounted calibration, without acquiring images.
@@ -491,8 +510,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 if decision.action=='navigate':
                     goals=[g for g in decision.groundings if g.role=='navigation_goal']
                     if not goals:raise ValueError('grounding: navigation_goal required')
-                    _,floor=support_plane(navmap.surface)
-                    floor_z=float(np.median(floor[:,2]))
+                    floor_z,_=navigation_floor(navmap.surface,robot.boundary_points(sim.q,sim.gripper_q))
                     position=grounded_world(obs,goals[0],floor_z=floor_z)
                     look=[g for g in decision.groundings if g.role=='look_at']
                     direction=grounded_world(obs,look[0])[:2]-position[:2] if look else position[:2]-sim.base_pose[:2]

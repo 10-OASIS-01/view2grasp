@@ -175,3 +175,79 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
         assert terminal_events==[]
     assert simulations[0].verification_steps==(45 if last_action=='finish' else 0)
     assert not (out/'error.txt').exists()
+
+
+@pytest.mark.parametrize('action',['navigate','turn'])
+def test_countertop_only_blocks_both_navigation_grounding_and_turn_planning(monkeypatch,tmp_path,action):
+    """Neither an image goal nor a direct turn may plan from countertop support."""
+    import view2grasp.mobile_runner as runner
+
+    events=[]
+    class Sim:
+        def __init__(self,*args,**kwargs):
+            self.q=np.zeros(7);self.gripper_q=np.zeros(2);self.time=0.;self.base_pose=np.zeros(3)
+            self.robot_xml='';self.joint_names=[];self.eef_name='';self.instruction='navigate'
+            self.camera='robot0_nav_front';self.frame=0;self.phase='observe'
+        def auxiliary_state(self):return {}
+        def observe(self,camera=None):
+            self.frame+=1;self.camera=camera or self.camera
+            return replace(observation(),frame_id=self.frame,camera_id=self.camera)
+        def step(self,*args):pytest.fail('unknown floor must block all physical motion')
+        def close(self):pass
+
+    class Robot:
+        def __init__(self,*args,**kwargs):pass
+        def set_auxiliary_state(self,*args):pass
+        def points(self,*args):return (np.array([[0.,0.,.002]]),)
+        def boundary_points(self,*args):return np.array([[0.,0.,.002],[0.,0.,1.2]])
+        def volumes(self,*args):return []
+        def visual_volumes(self,*args):return []
+        def depth(self,obs):return np.full_like(obs.depth,10.)
+        def close(self):pass
+
+    class Map:
+        surface=np.array([[x,y,.92] for x in np.linspace(-1,1,10) for y in np.linspace(-1,1,10)])
+        def __init__(self,*args,**kwargs):pass
+        def certify_home(self,*args):pass
+        def integrate(self,*args):pass
+        def certify_robot_state(self,*args):pass
+
+    class Decisions:
+        calls=0;seconds=0.
+        def __init__(self,*args):self.client=SimpleNamespace(close=lambda:None)
+        def decide(self,obs,instruction,history):
+            self.calls+=1
+            context=history[-1]['navigation_context']
+            assert context['floor_samples']==[] and 'floor_z_m' not in context
+            assert 'observe robot0_nav_floor' in context['floor_evidence_unavailable']
+            if self.calls==2:
+                assert any('navigation floor unobserved' in item.get('feedback','') for item in history)
+                return AgentDecision(action='abort',frame_id=obs.frame_id,camera_id=obs.camera_id)
+            assert self.calls==1
+            return AgentDecision(action='navigate' if action=='navigate' else 'observe',
+                frame_id=obs.frame_id,camera_id=obs.camera_id,
+                observation_motion='turn_left' if action=='turn' else 'none',
+                groundings=[GroundingProposal(kind='points',role='navigation_goal',
+                    frame_id=obs.frame_id,camera_id=obs.camera_id,points=[(.5,.5)])])
+
+    def no_planner(*args,**kwargs):pytest.fail('an unobserved floor must be rejected before constructing a navigation planner')
+    evaluator=SimpleNamespace(update=lambda:None,result=lambda:{'success':False,'collision':False,
+        'first_grasp_success':None,'official_success':False,'collision_free_success':False,
+        'path_length_m':0.,'held_path_length_m':0.})
+    monkeypatch.setattr(runner,'RoboCasaSimulator',Sim)
+    monkeypatch.setattr(runner,'scene_eligibility',lambda sim:{'eligible':True})
+    monkeypatch.setattr(runner,'MobileEvaluator',lambda sim:evaluator)
+    monkeypatch.setattr(runner,'RobotModel',Robot);monkeypatch.setattr(runner,'DepthMap',Map)
+    monkeypatch.setattr(runner,'Planner',lambda *args:SimpleNamespace())
+    monkeypatch.setattr(runner,'NavigationCollision',no_planner);monkeypatch.setattr(runner,'SE2Planner',no_planner)
+    monkeypatch.setattr(runner,'VLM',Decisions)
+    monkeypatch.setattr(runner.GroundingResolver,'from_config',lambda config:
+        SimpleNamespace(segmenter=None,sam_unavailable_reason='test',calls=0,seconds=0.))
+    monkeypatch.setattr(runner,'save_observation',lambda *args:None)
+    monkeypatch.setattr(runner,'save_episode',lambda out,sim,record,logged:events.extend(logged))
+    result=runner.run_mobile_episode('NavigateKitchen',3,'active',tmp_path,
+        ExperimentConfig(navigation_observations=2,perception_backend='rgbd'))
+    assert result['observations']==2 and result['path_length_m']==0.
+    assert len(result['geometry_rejections'])==1 and 'navigation floor unobserved' in result['geometry_rejections'][0]
+    assert not any(event['kind']=='navigation_plan' for event in events)
+    assert not (tmp_path/'NavigateKitchen_active_0003/error.txt').exists()

@@ -205,6 +205,7 @@ def test_lift_or_later_evidence_failure_never_allows_unverified_motion(monkeypat
         def __init__(self,*args,**kwargs):pass
         def set_auxiliary_state(self,*args):pass
         def points(self,*args):return (np.zeros((1,3)),)
+        def boundary_points(self,*args):return np.array([[0.,0.,1.002]])
         def volumes(self,*args):return []
         def visual_volumes(self,*args):return []
         def depth(self,obs):return np.full_like(obs.depth,10.)
@@ -212,7 +213,7 @@ def test_lift_or_later_evidence_failure_never_allows_unverified_motion(monkeypat
         def grasp_center_offset(self):return np.zeros(3)
         def close(self):pass
     class Map:
-        surface=source
+        surface=np.vstack([source,[[x,y,1.] for x in np.linspace(-1,1,10) for y in np.linspace(-1,1,10)]])
         def __init__(self,*args,**kwargs):pass
         def __getattr__(self,name):return lambda *args,**kwargs:None
     planners=[]
