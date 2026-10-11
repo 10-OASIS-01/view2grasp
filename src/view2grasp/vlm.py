@@ -271,11 +271,15 @@ class VLM:
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
                observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None,
-               current_frame_reselection=None,grounding_refinement=None,grounding_refinement_feedback=None):
+               current_frame_reselection=None,grounding_refinement=None,grounding_refinement_feedback=None,
+               annotation_roles=None):
         if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
             raise ValueError('unsupported observation purpose')
         if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
             raise ValueError(observe_purpose.replace('_',' ')+' requires a forced tabletop observation')
+        if annotation_roles is not None and (observe_purpose!='annotation' or
+                not isinstance(annotation_roles,(tuple,list)) or tuple(annotation_roles)!=('object',)):
+            raise ValueError('annotation_roles supports only object-only forced tabletop annotation')
         if current_frame_reselection is not None and (not isinstance(current_frame_reselection,dict)
                 or force_observe or force_grasp or obs.base_pose is not None or observe_purpose!='mapping_only'):
             raise ValueError('current-frame reselection requires an unforced tabletop decision and evidence dictionary')
@@ -427,6 +431,19 @@ class VLM:
                         'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
                         'All normalized coordinates refer to this image_size, including when it is a crop. '
                         'A projected crop does not establish visibility or identity. Omit uncertain regions.'}
+                if annotation_roles is not None:
+                    user['annotation_context']['requested_roles']=['object']
+                    user['annotation_context']['instructions']=(
+                        'Annotate ONLY the requested object in this supplied source image. '
+                        'Use only role=object: one tight box, polygon or mask region plus separate '
+                        'kind=points positive object-membership seeds on clearly visible material. '
+                        'No permitted part is requested; do not provide grasp_part or grasp_contact. '
+                        'Return observe with the CURRENT view fields; no camera command from this reply will execute. '
+                        'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
+                        'All normalized coordinates refer to this image_size, including when it is a crop. '
+                        'This establishes source-image membership only, not current held pose, contact or free space. '
+                        'A projected crop does not establish visibility or identity. Omit uncertain regions or seeds.')
+                    user['response_contract']+=' This annotation permits only object groundings; do not return grasp_part or grasp_contact.'
                 if diagnostic_metadata is not None:
                     user['annotation_context']['instructions']+=(
                         ' The FIRST image is the unmarked current image and the only output coordinate system. '
@@ -506,6 +523,8 @@ class VLM:
                     if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
                         raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
+                if annotation_roles is not None and any(g.role!='object' for g in decision.groundings):
+                    raise ValueError('this object-only annotation permits only role=object, not grasp_part or grasp_contact')
                 if current_frame_reselection is not None and decision.action=='grasp':
                     roles={g.role for g in decision.groundings if g.kind!='candidate'}
                     if not {'object','grasp_part'}<=roles:
