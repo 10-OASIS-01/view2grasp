@@ -290,7 +290,7 @@ class VLM:
         if grounding_refinement is not None:
             if (not isinstance(grounding_refinement,dict) or not force_grasp or force_observe
                     or obs.base_pose is not None or observe_purpose!='mapping_only'
-                    or current_frame_reselection is not None or annotation_diagnostic is not None):
+                    or current_frame_reselection is not None):
                 raise ValueError('grounding refinement requires an exclusive forced tabletop grasp and crop provenance dictionary')
             if (not isinstance(derived_image_context,dict) or grounding_refinement!=derived_image_context
                     or grounding_refinement.get('source_frame_id')!=obs.frame_id
@@ -317,8 +317,9 @@ class VLM:
         if derived_image_context is not None and observe_purpose!='annotation' and grounding_refinement is None:
             raise ValueError('derived images are supported only for current-frame annotation or grounding refinement')
         if annotation_diagnostic is not None:
-            if observe_purpose!='annotation':
-                raise ValueError('pixel diagnostics are supported only for current-frame annotation')
+            if observe_purpose!='annotation' and not (
+                    grounding_refinement is not None and grounding_refinement_feedback is not None):
+                raise ValueError('pixel diagnostics require current-frame annotation or an actual grounding refinement correction')
             annotation_diagnostic.validate_source(obs)
         image = io.BytesIO(); Image.fromarray(obs.rgb).save(image,format="PNG")
         image_sha256=hashlib.sha256(obs.rgb.tobytes()).hexdigest()
@@ -367,6 +368,9 @@ class VLM:
                     'Polygon vertices are boundaries, not membership seeds. Never seed the aperture, robot, '
                     'table or an uncertain surface. Object seeds retain measured body geometry for collisions; '
                     'they do not choose the contact or expand the permitted grasp_part. '
+                    'Use the smallest sufficient set of interior membership points, not a dense set along edges. '
+                    'One clear point per visible disconnected body surface is enough; the separately resolved '
+                    'handle contact also seeds its own object component. Avoid silhouette pixels and table shadows. '
                     'Use a polygon or mask only when you can trace its complete visible extent reliably; '
                     'any polygon hole must lie inside its outer boundary and must not remove the chosen handle material. '
                     'Provide a SEPARATE tight visible grasp_part region inside the object region: '
@@ -396,6 +400,17 @@ class VLM:
                     'or constraints, not correct semantic labels or suggested replacement contact points. '
                     'Do not mechanically union, expand or clip regions, or move a contact to a diagnostic pixel; '
                     'correct the visual annotation only when the current image supports it. All ordinary checks still apply.')
+                if diagnostic_metadata is not None:
+                    user['grounding_refinement_context']['instructions']+=(
+                        ' The FIRST image is the unmarked current crop. The SECOND image magnifies exactly '
+                        'the same acquired pixels with a coordinate grid and borders around actually rejected '
+                        'seeds. Both images share the same field of view and normalized pixel-center coordinates. '
+                        'The marked pixels are rejection evidence, not target labels or replacement seeds. '
+                        'Reinspect visible material; use a sparse set of clearly interior object points and the '
+                        'separate grasp_part region, or abort if uncertain. Return normalized FIRST-image '
+                        'coordinates; raw pixel indices refer to the FIRST image_size, never the enlarged grid. '
+                        'This transaction asks only for current-image localization, not a reconstructed earlier '
+                        'overview, a world-direction explanation or another camera view.')
         if current_frame_reselection is not None:
             user['current_frame_reselection_context']={
                 'purpose':'fresh_grounding_on_acquired_frame','frame_id':obs.frame_id,

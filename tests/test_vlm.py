@@ -251,7 +251,7 @@ def test_annotation_companion_rejected_for_mapping_or_different_current_image(tm
     from test_annotation_diagnostic import feedback
     obs=observation();diagnostic=build_annotation_diagnostic(obs,feedback(obs));client=VLM(tmp_path)
     try:
-        with pytest.raises(ValueError,match='only for current-frame annotation'):
+        with pytest.raises(ValueError,match='require current-frame annotation or an actual grounding refinement correction'):
             client.decide(obs,'test',[],annotation_diagnostic=diagnostic)
         changed=replace(obs,rgb=np.ones_like(obs.rgb))
         with pytest.raises(ValueError,match='current unmarked image'):

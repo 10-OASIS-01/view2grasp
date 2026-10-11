@@ -5,6 +5,7 @@ import numpy as np
 
 from .geometry import unproject
 from .observation_crop import ObservationCrop,crop_grasp_proposal
+from .annotation_diagnostic import build_annotation_diagnostic
 
 
 def _possible_contact_pixels(obs,support_z):
@@ -56,9 +57,10 @@ def refine_grasp_grounding(obs,coarse,resolver,vlm,instruction,history,support_z
         'full_frame_fallback':possible_pixels==0,
         'instructions':'Inspect only this supplied current image and the task instruction. '
             'Return fresh object and grasp_part regions or abort; no earlier pixel coordinates apply.'}}]
-    feedback=None
+    feedback=None;diagnostic=None
     for repair in range(2):
-        options={} if feedback is None else {'grounding_refinement_feedback':feedback}
+        options={} if feedback is None else {'grounding_refinement_feedback':feedback,
+            'annotation_diagnostic':diagnostic}
         raw=vlm.decide(crop.observation,instruction,copy.deepcopy(current_history),force_grasp=True,
             grounding_refinement=image_context,derived_image_context=image_context,**options)
         restored=crop.restore_grasp_decision(raw)
@@ -76,7 +78,25 @@ def refine_grasp_grounding(obs,coarse,resolver,vlm,instruction,history,support_z
                 'image_shape_hw':list(crop.observation.depth.shape),
                 'repair_attempt':1,'max_geometry_repairs':1,'previous_crop_decision':raw.model_dump(),
                 'geometry_diagnostics':crop.localize_grounding_error(exc)}
+            # Mark only the actual rejected source pixels after the existing
+            # crop transform. Outside-crop failures remain in text diagnostics;
+            # they must not be clipped to a different visible pixel or seed.
+            samples=[];seen=set();outside=0
+            for sample in feedback['geometry_diagnostics'].get('rejected_seeds',[]):
+                if not sample['inside_crop']:
+                    outside+=1
+                    continue
+                pixel=tuple(sample['pixel'])
+                if pixel not in seen:
+                    seen.add(pixel)
+                    if len(samples)<12:samples.append(copy.deepcopy(sample))
+            feedback.update(rejected_samples=samples,
+                diagnostic_omitted_outside_crop=outside,
+                diagnostic_samples_truncated=len(seen)>len(samples))
+            diagnostic=build_annotation_diagnostic(crop.observation,feedback)
             emit('grounding_refinement_feedback',**feedback)
+            emit('grounding_refinement_diagnostic',frame_id=obs.frame_id,repair=1,
+                provenance=diagnostic.provenance())
         else:
             resolved.report['image_context']=image_context
             return restored,resolved

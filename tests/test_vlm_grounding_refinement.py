@@ -223,3 +223,43 @@ def test_geometry_feedback_rejects_stale_or_out_of_scope_transaction_before_requ
         with pytest.raises(ValueError):client.decide(obs,'Grasp the handle',[],**kwargs)
     finally:client.client.close()
     assert client.calls==0 and not list(tmp_path.iterdir())
+
+
+def test_refinement_correction_logs_same_pixel_diagnostic_with_exact_wire_images(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    obs=observation();obs.rgb[:]=np.random.default_rng(45).integers(0,256,obs.rgb.shape,dtype=np.uint8)
+    evidence=provenance(obs);feedback=geometry_feedback(obs);requests=[]
+    feedback['rejected_samples']=feedback['geometry_diagnostics']['rejected_seeds']
+    aid=build_annotation_diagnostic(obs,feedback)
+    client=client_with_replies(tmp_path,[grasp(obs)],requests)
+    try:answer=client.decide(obs,'Grasp the handle',[],force_grasp=True,
+        grounding_refinement=evidence,derived_image_context=evidence,
+        grounding_refinement_feedback=feedback,annotation_diagnostic=aid)
+    finally:client.client.close()
+    assert answer.action=='grasp' and client.calls==1
+    request=json.loads((tmp_path/'call_000.json').read_text())['request']
+    assert request['annotation_diagnostic_sha256']==aid.provenance()['diagnostic_rgb_sha256']
+    context=request['context']
+    assert context['image_size']=={'width':32,'height':32}
+    assert context['grounding_refinement_feedback']==feedback
+    assert 'not target labels or replacement seeds' in context['grounding_refinement_context']['instructions']
+    assert len(requests[0]['messages'][1]['content'])==3
+    for actual,logged in zip(requests[0]['messages'][1]['content'][1:],request['messages'][1]['content'][1:]):
+        png=base64.b64decode(actual['image_url']['url'].split(',',1)[1])
+        assert png==(tmp_path/logged['image_url']['url']).read_bytes()
+    assert np.array_equal(aid.rgb[::aid.scale,::aid.scale],obs.rgb)
+
+
+def test_refinement_correction_rejects_another_images_coordinate_aid(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    obs=observation();other=replace(obs,rgb=obs.rgb.copy());other.rgb[0,0]=[1,2,3]
+    evidence=provenance(obs);feedback=geometry_feedback(obs)
+    aid=build_annotation_diagnostic(other,feedback)
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='does not match the current unmarked image'):
+            client.decide(obs,'Grasp the handle',[],force_grasp=True,
+                grounding_refinement=evidence,derived_image_context=evidence,
+                grounding_refinement_feedback=feedback,annotation_diagnostic=aid)
+    finally:client.client.close()
+    assert client.calls==0 and not list(tmp_path.iterdir())

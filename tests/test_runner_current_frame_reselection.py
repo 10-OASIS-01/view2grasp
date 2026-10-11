@@ -109,7 +109,8 @@ def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=
         def decide(self,obs,instruction,history,**kwargs):
             self.calls+=1;assert self.calls<=12
             e.calls.append({'frame_id':obs.frame_id,'kwargs':copy.deepcopy(kwargs),
-                'history':json.loads(json.dumps(history)),'input_shape':obs.depth.shape})
+                'history':json.loads(json.dumps(history)),'input_shape':obs.depth.shape,
+                'instruction':instruction})
             if 'grounding_refinement' in kwargs:
                 assert kwargs['force_grasp'] is True
                 if refinement=='error':raise RuntimeError('refinement API unavailable')
@@ -274,6 +275,26 @@ def test_refinement_uses_same_frame_crop_and_restores_before_resolver_not_mappin
     assert e.candidates[0] is e.candidates[1] and e.candidates[2] is e.candidates[3]
     assert result['observations']==6 and result['attempts']==0
     assert sum(row['kind']=='grounding_refinement_decision' for row in e.events)==2
+
+
+def test_refinement_task_is_current_image_only_without_changing_camera_or_planning_task(tmp_path,monkeypatch):
+    from view2grasp import runner
+    _,e=episode(tmp_path,monkeypatch,refinement=True)
+    refinement=[c for c in e.calls if 'grounding_refinement' in c['kwargs']]
+    ordinary=[c for c in e.calls if 'grounding_refinement' not in c['kwargs']]
+    assert refinement and ordinary
+    assert all(c['instruction']==runner.INSTRUCTIONS['mug'] for c in ordinary)
+    for call in refinement:
+        instruction=call['instruction']
+        assert instruction==runner._MUG_REFINEMENT_INSTRUCTION
+        assert 'complete visible cup body AND handle' in instruction
+        assert 'midpoint of the straight outer vertical handle bar' in instruction
+        assert 'Every seed remains binding' in instruction
+        assert 'at least one clearly interior seed on visible cup-body material' in instruction
+        assert 'a redundant handle membership seed is not required' in instruction
+        assert 'separately visible material component' in instruction
+        assert 'CURRENT image' in instruction and 'currently visible material' in instruction
+        assert all(word not in instruction.lower() for word in ('overhead','radial','broadside','observation 2'))
 
 
 @pytest.mark.parametrize('reply',['error','observe','abort'])

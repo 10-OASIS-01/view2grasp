@@ -26,6 +26,20 @@ from .object_annotation import annotate_source_object
 from .payload_registration import register_payload_source,PayloadRegistrationError
 
 
+_MUG_REFINEMENT_INSTRUCTION=(
+    'Annotate the mug in this supplied CURRENT image for a handle-only grasp. '
+    'Return grasp or abort. Give one tight object region around the complete visible cup body AND handle, '
+    'separate object-membership seeds, and a separate tight grasp_part region around the midpoint of '
+    'the straight outer vertical handle bar, excluding the cup body and both junctions. '
+    'Provide at least one clearly interior seed on visible cup-body material; '
+    'add another only for a separately visible material component, not to outline edges or repeat the same patch. '
+    'The independent grasp_part region supplies handle contact; a redundant handle membership seed is not required. '
+    'Every seed remains binding. Never seed the aperture, support, robot or uncertain material. '
+    'Omit optional grasp_contact and point fields. Use only the supplied image coordinate space. '
+    'Describe only currently visible material in the reason; do not infer a new camera view or refer to '
+    'an earlier image that is not supplied. If the requested material cannot be located confidently, abort.')
+
+
 def _contact_annotation_progressed(previous, current):
     """Authorize a bounded final semantic reply, never accept geometry here."""
     for report in (previous,current):
@@ -368,7 +382,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 coarse=decision
                 try:
                     decision,refinement_resolved=refine_grasp_grounding(obs,coarse,resolver,vlm,
-                        INSTRUCTIONS[task],history,map_.table_z,robot_depth=robot_depths.get(obs.frame_id),
+                        _MUG_REFINEMENT_INSTRUCTION,history,map_.table_z,robot_depth=robot_depths.get(obs.frame_id),
                         event=lambda kind,**data:event(kind,observations_used=record.observations,**data))
                     save_observation(out/'observations',obs,decision)
                 except (ValueError,RuntimeError) as exc:
