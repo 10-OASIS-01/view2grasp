@@ -327,6 +327,53 @@ class ContactAssociation:
     report: dict
 
 
+def _region_contact(obs,mask,distance):
+    """Choose a measured interior representative, never complete hidden parts.
+
+    For a strongly elongated observed region, prefer its central axial third
+    before maximizing image-space interior distance. A wide end junction must
+    not win merely because it has the largest inscribed circle. This is a
+    representative of the supplied visible region, not a semantic midpoint or
+    evidence of contact/path safety. Seeded decisions never use this policy.
+    """
+    from .geometry import unproject
+    rows,cols=np.where(mask)
+    pixels_yx=np.c_[rows,cols];center=pixels_yx.mean(axis=0)
+    width=distance[mask]
+    maxima=np.flatnonzero(width==width.max())
+    selected=maxima[np.argmin(np.sum((pixels_yx[maxima]-center)**2,axis=1))]
+    evidence={'method':'global_interior_centroid_tie','basis':'current_measured_part_mask',
+        'meaning':'observed_region_representative_not_hidden_part_midpoint_or_safety',
+        'measured_pixels':len(rows)}
+    xyz=unproject(np.c_[cols,rows],obs.depth[mask],obs.K,obs.T_wc)
+    if np.isfinite(xyz).all() and len(xyz)>=4:
+        centered=xyz-xyz.mean(axis=0)
+        values,axes=np.linalg.eigh(centered.T@centered/(len(xyz)-1))
+        axis=axes[:,-1]
+        if axis[np.argmax(np.abs(axis))]<0:axis=-axis
+        ratio=float(values[-1]/max(values[-2],1e-12))
+        projection=xyz@axis
+        lower,upper=np.quantile(projection,[.05,.95]);span=float(upper-lower)
+        evidence.update(principal_variance_ratio=ratio,principal_axis_world=axis.tolist(),
+            robust_axis_range_m=[float(lower),float(upper)],min_variance_ratio=4.,
+            extent_quantiles=[.05,.95],central_axis_fraction=[1/3,2/3])
+        if ratio>=4. and span>1e-9:
+            ids=np.flatnonzero((projection>=lower+span/3)&(projection<=upper-span/3))
+            evidence['central_band_pixels']=len(ids)
+            if len(ids):
+                choices=ids[width[ids]==width[ids].max()]
+                axial=np.abs(projection[choices]-(lower+upper)/2)
+                index=np.lexsort((np.sum((pixels_yx[choices]-center)**2,axis=1),axial))[0]
+                selected=choices[index]
+                evidence.update(method='observed_axis_central_third_interior',
+                    selected_axis_fraction=float((projection[selected]-lower)/span))
+            else:evidence['fallback_reason']='no_measured_pixels_in_central_band'
+    else:evidence['fallback_reason']='insufficient_finite_measured_geometry'
+    y,x=pixels_yx[selected]
+    evidence.update(pixel=[int(x),int(y)],interior_distance_pixels=float(width[selected]))
+    return (y,x),evidence
+
+
 class GroundingResolver:
     def __init__(self, segmenter=None, sam_unavailable_reason=None):
         self.segmenter = segmenter
@@ -392,12 +439,10 @@ class GroundingResolver:
         distance = cv2.distanceTransform(part_mask.astype(np.uint8),cv2.DIST_L2,3)
         y,x = np.unravel_index(distance.argmax(),distance.shape)
         if not part_seeds:
-            # A narrow bar has many equally interior pixels. Row-major argmax
-            # biases contact toward its top/left end; center only this exact
-            # maximum-distance set, preserving all region and depth filtering.
-            maxima=np.argwhere(distance==distance.max())
-            center=np.argwhere(part_mask).mean(axis=0)
-            y,x=maxima[np.argmin(np.sum((maxima-center)**2,axis=1))]
+            (y,x),report['point_selection']=_region_contact(obs,part_mask,distance)
+        else:
+            report['point_selection']={'method':'explicit_contact' if contact_seeds else 'seeded_part_global_interior',
+                'basis':'unchanged_explicit_seed_policy'}
         h,w = obs.depth.shape
         contact = contact_seeds[0] if contact_seeds else (x/(w-1),y/(h-1))
         object_mask = region(object_proposals,[contact])
