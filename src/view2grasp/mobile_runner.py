@@ -21,6 +21,21 @@ from .vlm import VLM
 from .view_advisor import suggest_mounted_cameras
 
 
+class NavigationGroundingError(ValueError):
+    """Keep measured rejection evidence without turning it into a new action."""
+    def __init__(self,message,diagnostics):
+        super().__init__(message)
+        self.diagnostics=diagnostics
+
+
+def observed_floor_mask(obs,floor_z):
+    valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)
+    v,u=np.where(valid)
+    world=unproject(np.stack([u,v],axis=-1),obs.depth[v,u],obs.K,obs.T_wc)
+    valid[v,u] &= np.abs(world[:,2]-floor_z)<=.06
+    return valid
+
+
 def grounded_world(obs,g,*,floor_z=None):
     """Resolve an image grounding; navigation regions use observed floor only."""
     if g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id:raise ValueError('stale grounding')
@@ -34,10 +49,12 @@ def grounded_world(obs,g,*,floor_z=None):
             # A broad proposed region can contain both floor and a cabinet or
             # wall. Select its interior after applying the same floor-height
             # requirement as an explicit point; never move a supplied point.
-            v,u=np.where(mask)
-            world=unproject(np.stack([u,v],axis=-1),obs.depth[v,u],obs.K,obs.T_wc)
-            mask[v,u] &= np.abs(world[:,2]-navigation_floor)<=.06
-            if not mask.any():raise ValueError('grounding: navigation region has no observed floor')
+            mask &= observed_floor_mask(obs,navigation_floor)
+            if not mask.any():
+                raise NavigationGroundingError('grounding: navigation region has no observed floor',{
+                    'frame_id':obs.frame_id,'camera_id':obs.camera_id,'proposal_kind':g.kind,
+                    'floor_z_m':float(navigation_floor),'floor_tolerance_m':.06,
+                    'floor_pixels_in_region':0})
         d=cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,3)
         if d.max()==0:raise ValueError('grounding has no valid interior')
         y,x=np.unravel_index(d.argmax(),d.shape);h,w=d.shape;xy=(x/(w-1),y/(h-1))
@@ -45,7 +62,11 @@ def grounded_world(obs,g,*,floor_z=None):
     if not np.isfinite(depth) or not .05<depth<10:raise ValueError('invalid grounding depth')
     position=unproject(uv,depth,obs.K,obs.T_wc)
     if navigation_floor is not None and abs(position[2]-navigation_floor)>.06:
-        raise ValueError('grounding: navigation goal is not on observed floor')
+        raise NavigationGroundingError('grounding: navigation goal is not on observed floor',{
+            'frame_id':obs.frame_id,'camera_id':obs.camera_id,'proposal_kind':g.kind,
+            'pixel':uv.tolist(),'normalized_pixel':list(map(float,xy)),
+            'world_xyz_m':position.tolist(),'floor_z_m':float(navigation_floor),
+            'height_above_floor_m':float(position[2]-navigation_floor),'floor_tolerance_m':.06})
     return position
 
 
@@ -61,6 +82,42 @@ def support_plane(points,anchor=None):
     level=valid.max() if anchor is not None else valid.min()
     selected=points[np.abs(points[:,2]-level*.005)<.008]
     return float(np.median(selected[:,2])),selected
+
+
+def navigation_observation_context(obs,observed_points,robot_depth=None):
+    """Bounded current-image floor evidence; no destination or path oracle."""
+    context={'frame_id':obs.frame_id,'camera_id':obs.camera_id,'floor_samples':[],
+        'evidence_scope':'Measured floor height only; samples do not establish robot clearance, reachability, or destination identity.',
+        'guidance':('Identify the requested destination in an acquired image before choosing a route toward it. '
+            'If a downward floor view does not establish the destination, use observe with an available '
+            'nav_front/nav_high_* camera to inspect fixtures, then relate a visible floor waypoint to that destination. '
+            'Use current-frame groundings only; old-frame pixel coordinates cannot be reused. '
+            'Prefer a floor region when a precise point is uncertain. Preserve an observation to verify arrival '
+            'and use finish when the task appears complete; movement alone is not success.')}
+    try:floor_z,_=support_plane(observed_points)
+    except ValueError as exc:
+        context['floor_evidence_unavailable']=str(exc)
+        return context
+    mask=observed_floor_mask(obs,floor_z)
+    if robot_depth is not None:
+        # Do not advertise a robot silhouette or a return behind it as a floor
+        # suggestion. This filters advice only, never modifies map evidence.
+        robot_valid=np.isfinite(robot_depth)&(robot_depth>.005)&(robot_depth<10)
+        mask &= ~(robot_valid&(robot_depth<=obs.depth+.003))
+    context.update(floor_z_m=float(floor_z),floor_tolerance_m=.06,
+                   observed_floor_pixels=int(mask.sum()))
+    import cv2
+    distance=cv2.distanceTransform(np.pad(mask.astype(np.uint8),1),cv2.DIST_L2,3)[1:-1,1:-1]
+    h,w=mask.shape;v,u=np.mgrid[:h,:w]
+    for _ in range(3):
+        y,x=np.unravel_index(distance.argmax(),distance.shape)
+        if distance[y,x]<=0:break
+        point=unproject(np.array([x,y]),obs.depth[y,x],obs.K,obs.T_wc)
+        context['floor_samples'].append({'pixel':[int(x),int(y)],
+            'normalized_pixel':[float(x/(w-1)),float(y/(h-1))],'world_xyz_m':point.tolist()})
+        radius=max(8.,float(distance[y,x])*2)
+        distance[(u-x)**2+(v-y)**2<=radius**2]=0
+    return context
 
 
 def payload_envelope(points,spacing=.01):
@@ -391,6 +448,8 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 'holding':payload is not None and payload.holding,
                 'payload_state':'empty' if payload is None else payload.state,'base_pose':sim.base_pose.tolist(),
                 'feedback':'Navigate using visible floor goals. Base motion is limited to 25 cm before observing again. Grasp only when target is reachable; place only when holding.'})
+            if task=='NavigateKitchen':
+                history[-1]['navigation_context']=navigation_observation_context(obs,navmap.surface,self_depth)
             decision=vlm.decide(obs,sim.instruction,history)
             save_observation(out/'observations',obs,decision);event('decision',**decision.model_dump())
             record.grounding_types.extend(g.kind for g in decision.groundings)
@@ -550,7 +609,12 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 else:raise ValueError('unsupported action')
                 history.append({'decision':decision.model_dump(),'feedback':'action completed; verify from new observation'})
             except ValueError as exc:
-                history.append({'feedback':str(exc)});event('rejected',reason=str(exc));record.failure=str(exc)
+                details={}
+                if isinstance(exc,NavigationGroundingError):
+                    details={'decision':decision.model_dump(),'navigation_grounding':exc.diagnostics,
+                        'next_step':'Correct the non-floor grounding using the next current-frame floor evidence. A floor sample is not a collision-free route or a destination estimate.'}
+                history.append({'feedback':str(exc),**details})
+                event('rejected',reason=str(exc),**details);record.failure=str(exc)
                 record.geometry_rejections.append(str(exc))
             if record.observations>=budget:
                 record.failure='observation budget exhausted'

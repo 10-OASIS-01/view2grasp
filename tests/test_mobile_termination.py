@@ -15,8 +15,9 @@ from view2grasp.types import AgentDecision,GroundingProposal
     ('navigate',False),('navigate',True),('finish',False),('finish',True),
     ('abort',False),('rejected_navigation',False),
 ])
+@pytest.mark.parametrize('initial_bad_point',[False,True])
 def test_terminal_reason_after_rejected_grounding_and_successful_drive(
-        monkeypatch,tmp_path,last_action,verified):
+        monkeypatch,tmp_path,last_action,verified,initial_bad_point):
     """Run the actual orchestration and short-drive loop with offline devices.
 
     The first proposal is rejected, the second drives the base, and the last
@@ -37,9 +38,11 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
         def observe(self,camera=None):
             self.camera=camera or self.camera;self.frame_id+=1
             pose=np.eye(4);pose[:2,3]=self.base_pose[:2]
-            return replace(observation(),frame_id=self.frame_id,camera_id=self.camera,
+            obs=replace(observation(),frame_id=self.frame_id,camera_id=self.camera,
                 T_wc=pose,q=self.q.copy(),gripper_q=self.gripper_q.copy(),timestamp=self.time,
                 base_pose=self.base_pose.copy())
+            if initial_bad_point:obs.depth[16,16]=1.2
+            return obs
         def step(self,q,gripper,velocity=None):
             self.time+=.05;self.q=q.copy()
             if self.phase=='verify':self.verification_steps+=1
@@ -78,11 +81,20 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
         def decide(self,obs,instruction,history):
             self.calls+=1
             assert self.calls<=3,'runner must stop at the terminal decision'
+            context=history[-1]['navigation_context']
+            assert context['frame_id']==obs.frame_id and context['camera_id']==obs.camera_id
+            if self.calls==2 and initial_bad_point:
+                rejected=next(item for item in reversed(history) if 'navigation_grounding' in item)
+                assert rejected['navigation_grounding']['frame_id']==decisions[0].frame_id
+                assert rejected['navigation_grounding']['pixel']==[16,16]
+                assert rejected['navigation_grounding']['height_above_floor_m']==pytest.approx(.2)
+                assert rejected['decision']==decisions[0].model_dump()
             action='navigate' if self.calls<3 else last_action
             groundings=[]
-            if action=='navigate' and self.calls>1:
+            if action=='navigate' and (self.calls>1 or initial_bad_point):
                 groundings=[GroundingProposal(kind='points',role='navigation_goal',
-                    frame_id=obs.frame_id,camera_id=obs.camera_id,points=[(.9,.5)])]
+                    frame_id=obs.frame_id,camera_id=obs.camera_id,
+                    points=[(.5,.5) if self.calls==1 else (.9,.5)])]
             if action=='rejected_navigation':action='navigate'
             decision=AgentDecision(action=action,frame_id=obs.frame_id,camera_id=obs.camera_id,
                 groundings=groundings,reason='stop requested' if action=='abort' else '')
@@ -119,8 +131,13 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
     assert json.loads((out/'result.json').read_text())==result
     assert len(decisions)==3 and result['observations']==3
     assert result['path_length_m']>.2 and any(e['kind']=='navigation_plan' for e in events)
-    rejection='grounding: navigation_goal required'
-    assert result['geometry_rejections']==[rejection]*(2 if last_action=='rejected_navigation' else 1)
+    rejection=('grounding: navigation goal is not on observed floor' if initial_bad_point else
+        'grounding: navigation_goal required')
+    assert result['geometry_rejections']==[rejection]+(
+        ['grounding: navigation_goal required'] if last_action=='rejected_navigation' else [])
+    if initial_bad_point:
+        rejected=next(event for event in events if event['kind']=='rejected')
+        assert rejected['navigation_grounding']['pixel']==[16,16]
     assert result['success'] is verified
     if verified:
         assert result['failure']==''
