@@ -1,4 +1,6 @@
 # Targeted handled-object perception debugging only; not a benchmark protocol.
-# One extra actual view is allowed to expose the mug / handle self-shadow.
+# Initial handle grounding is due by frame 3: one alternate view may reveal
+# material occluded in the first broadside. Six pre-close frames in total,
+# including planning recovery, leave three frames for the post-close sweep.
 max_observations: 9
 planning_seconds: 30

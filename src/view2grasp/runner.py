@@ -104,11 +104,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={}
         while record.observations<=pregrasp_limit and record.attempts<config.max_attempts:
-            # Freeze the handled-object representation rule before validation:
-            # one chosen broadside view, then a handle grounding or abort. This
-            # preserves the approach ray and reserves evidence for planning and
-            # the post-close payload sweep instead of test-time view shopping.
-            force_at=min(2 if task=="mug" else config.max_observations-3,pregrasp_limit)
+            # Bounded development policy: a larger mug budget permits one
+            # alternate semantic view if the first broadside is occluded. Keep
+            # at least one pre-close mapping slot and all post-close slots.
+            # Once grounded, mapping recovery still preserves the original ray.
+            force_at=(min(3,max(2,pregrasp_limit-1),pregrasp_limit) if task=='mug'
+                else min(config.max_observations-3,pregrasp_limit))
+            if task=='mug':
+                history.append({'initial_grounding_deadline':force_at,
+                    'observations_used':record.observations,
+                    'remaining_pregrasp_observations':pregrasp_limit-record.observations,
+                    'reserved_post_close_observations':reserve_after_close,
+                    'feedback':'Ground now if the solid handle is visible. Before the initial grounding deadline, an occluded view may be replaced by another actual view. After grounding, preserve its approach ray during mapping recovery.'})
             decision=pending_decision or vlm.decide(obs,INSTRUCTIONS[task],history,
                 force_grasp=record.observations>=force_at or strategy!="active")
             pending_decision=None

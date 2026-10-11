@@ -276,7 +276,7 @@ class VLM:
                     if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
                         raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
-                if force_grasp and decision.action == "observe": raise ValueError("observation budget exhausted: grasp or abort")
+                if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
                 if force_observe and decision.action != "observe": raise ValueError("this mapping step requires an observe action to collect additional geometry")
                 last_error=None
                 return decision

@@ -35,7 +35,7 @@ def test_observation_grounding_planner_recording_pipeline(tmp_path,monkeypatch):
 
 def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
                     strategy='active',max_observations=9,always_observe=False,task='mug',
-                    rejection_state=0):
+                    rejection_state=0,observe_until_grounding_deadline=False):
     """Exercise the runner's real recovery transaction without rendering or VLM IO."""
     from view2grasp import runner,recording
     evidence=SimpleNamespace(observed=[],executed=[],advice=[],events=[],planning_frames=[],vlm=[])
@@ -119,7 +119,9 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
             self.calls=0;self.seconds=0.;self.client=SimpleNamespace(close=lambda:None)
         def decide(self,obs,*args,**kwargs):
             self.calls+=1;evidence.vlm.append((obs.frame_id,kwargs))
-            if always_observe or kwargs.get('force_observe') or (obs.frame_id==1 and strategy=='active'):
+            initial_observe=(not kwargs.get('force_grasp') if observe_until_grounding_deadline
+                else obs.frame_id==1 and strategy=='active')
+            if always_observe or kwargs.get('force_observe') or initial_observe:
                 return AgentDecision(action='observe',frame_id=obs.frame_id)
             return AgentDecision(action='grasp',frame_id=obs.frame_id,point=(.5,.5),
                 bbox=(0.,0.,1.,1.),part_bbox=(0.,0.,1.,1.))
@@ -242,3 +244,44 @@ def test_observe_decision_cannot_consume_reserved_frames(
     assert evidence.events[-1]['reserved_after_close']==expected_reserve
     assert evidence.vlm[-1][1]['force_grasp']
     assert not evidence.executed
+
+
+@pytest.mark.parametrize('max_observations,grounding_frame,planned_on,planning_frames,post_frames',[
+    (9,3,3,[3,5,6],[7,8,9]),
+    (6,2,2,[2,3],[4,5,6]),
+])
+def test_mug_initial_visibility_retry_respects_grounding_and_mapping_budgets(
+        tmp_path,monkeypatch,max_observations,grounding_frame,planned_on,
+        planning_frames,post_frames):
+    # The model requests another semantic view only while the actual runner
+    # contract permits one, then grounds. Recovery still needs real frames.
+    result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=4,
+        max_observations=max_observations,planned_on=planned_on,
+        observe_until_grounding_deadline=True)
+    initial_calls=evidence.vlm[:grounding_frame]
+    assert [frame for frame,_ in initial_calls]==list(range(1,grounding_frame+1))
+    assert [kwargs['force_grasp'] for _,kwargs in initial_calls]==(
+        [False]*(grounding_frame-1)+[True])
+    initial_decisions=[event for event in evidence.events if event['kind']=='decision']
+    assert [event['action'] for event in initial_decisions]==(
+        ['observe']*(grounding_frame-1)+['grasp'])
+    assert evidence.planning_frames==planning_frames
+    assert planning_frames[-1]<=max_observations-3
+    assert [frame for frame,phase in evidence.observed if phase=='close']==post_frames
+    assert result['observations']==max_observations and result['attempts']==1
+    assert 'lift' in evidence.executed
+    retries=[event for event in evidence.events if event['kind'] in
+        ('recovery_planning','retry_recovery_planning')]
+    assert retries and all(event['preserved_grounding_frame']==grounding_frame for event in retries)
+
+
+def test_mug_extra_initial_view_does_not_spend_post_close_reserve_on_failed_planning(
+        tmp_path,monkeypatch):
+    result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=4,
+        observe_until_grounding_deadline=True)
+    assert evidence.planning_frames==[3,5,6]
+    assert result['observations']==6 and result['attempts']==0
+    assert result['failure']=='planning: unknown space'
+    assert not evidence.executed
+    assert evidence.events[-1]['kind']=='observation_budget_reserved'
+    assert evidence.events[-1]['reserved_after_close']==3
