@@ -223,7 +223,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     repair=0,provenance=annotation_diagnostic.provenance())
             for repair in range(3):
                 try:
-                    annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
+                    # Earlier images use different crop coordinates. Keep the
+                    # complete planning history locally, but send only this
+                    # image's annotation transaction (including its repair).
+                    annotation_history=copy.deepcopy([history[-1]])
+                    annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],annotation_history,force_observe=True,
                         observe_purpose='annotation',derived_image_context=image_context if crop is not None else None,
                         annotation_diagnostic=annotation_diagnostic)
                     raw_annotation=annotation.model_dump()

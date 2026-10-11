@@ -43,7 +43,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     original_object=part_reference.copy() if multiple_mapping_views or topology_repair else xyz[mask]
     evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[],
         removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[],annotation_shapes=[],association_shapes=[],
-        association_frames=[],association_references=[],planning_association_frames=[])
+        association_frames=[],association_references=[],planning_association_frames=[],annotation_replies={})
     candidate=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=part_reference[0],grasp_center=part_reference[0])
     original_ray=candidate.approach.copy()
@@ -129,11 +129,35 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             self.calls+=1;evidence.vlm_calls.append((obs.frame_id,kwargs,json.loads(json.dumps(history))))
             assert self.calls<=(9 if post_close else 7 if multiple_mapping_views else 5),'annotation must not create an unbounded repair loop'
             if self.calls==1:
+                evidence.global_history=history
                 return annotations(obs,mask,original_part).model_copy(update={'action':'grasp'})
             if 'contact_reassociation' not in history[-1]:
+                assert history is evidence.global_history
                 return annotations(obs,mask).model_copy(update={'groundings':[]})
             evidence.annotation_shapes.append(obs.depth.shape)
             assert kwargs['observe_purpose']=='annotation'
+            # Exercise the actual runner with old grasp pixels, mapping advice,
+            # and (in multi-frame cases) earlier annotations in global history.
+            # Only the current acquired image's transaction goes to the VLM.
+            assert len(history)==1 and set(history[0])=={'contact_reassociation'}
+            assert history is not evidence.global_history and len(evidence.global_history)>1
+            assert any('coverage_advice' in item for item in evidence.global_history)
+            assert any(item.get('decision',{}).get('frame_id')==1 for item in evidence.global_history)
+            transaction=history[0]['contact_reassociation']
+            assert transaction['frame_id']==obs.frame_id and transaction['camera_id']==obs.camera_id
+            assert transaction is not evidence.global_history[-1]['contact_reassociation']
+            assert transaction['image_context'] is not evidence.global_history[-1]['contact_reassociation']['image_context']
+            if 'previous_annotation' in transaction:
+                assert transaction['previous_annotation']==evidence.annotation_replies[obs.frame_id]
+                assert transaction['previous_annotation']['frame_id']==obs.frame_id
+                assert transaction['geometry_rejection']['frame_id']==obs.frame_id
+                assert transaction['geometry_rejection']['camera_id']==obs.camera_id
+            else:
+                assert 'geometry_rejection' not in transaction
+            # A client-side mutation must not leak back into global planning or
+            # the next correction's copied source transaction.
+            assert 'client_mutation' not in transaction
+            transaction['client_mutation']='annotation-local-only'
             image_context=history[-1]['contact_reassociation']['image_context']
             assert kwargs['derived_image_context']==(None if crop_mode=='fallback' else image_context)
             diagnostic=kwargs.get('annotation_diagnostic')
@@ -185,6 +209,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
                 result=result.model_copy(update={'point':(.5,.5)})
                 evidence.expected_source_pixel=np.array([x0+64,y0+64])
             if outcome=='missing_part':result=result.model_copy(update={'groundings':result.groundings[:1]})
+            evidence.annotation_replies[obs.frame_id]=result.model_dump()
             return result
 
     resolver=GroundingResolver()
@@ -232,6 +257,9 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         monkeypatch.setattr(runner,'crop_observation',unavailable_crop)
     result=runner.run_episode('occluded',3,'active',tmp_path,replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=6 if multiple_mapping_views else 4,perception_backend='rgbd'))
+    assert 'client_mutation' not in json.dumps(evidence.global_history)
+    assert any('coverage_advice' in item for item in evidence.global_history)
+    assert any(item.get('decision',{}).get('frame_id')==1 for item in evidence.global_history)
 
     if multiple_mapping_views:
         # Frames 2 and 3 belong to the SAME multi-view recovery loop. The old

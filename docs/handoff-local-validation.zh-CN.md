@@ -148,7 +148,12 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 `handoff-occluded-11` 全部 211 个保存状态已实际回放（20 fps、10.55 s），独立评分与结果一致；37 个 Python 源文件匹配 `c4d3798`。见 `artifacts/handoff/occluded-11-replay-report.json` 和 `artifacts/handoff/occluded-11-source-provenance.json`。
 
+
+同一张第 9 帧持物图的上下文对照表明，历史中的其他帧标注会干扰定位。保持 SYSTEM、两张 PNG、模型设置与其他上下文逐项一致，只将 history 从 33 条缩为本帧当前事务，首次输出改善到 450 个原参考锚点，但仍有 49 个越界深度点，严格拒绝。随后仅用该实际回答与本图几何反馈进行一次纠错，取得 428 个物体／部位点、419 个原参考锚点，通过完全相同的严格解析；两次分别 3.16 s 和 4.85 s。生产标注现只携带当前事务的深拷贝；全局规划历史、原射线、参考及最多三答上限不变。探针不等于任务成功：`artifacts/handoff/occluded-09-minimal-history-online-02/report.json`、`artifacts/handoff/occluded-09-scoped-correction-online/report.json`。另一次改用 GLM-4.6V 的旧全历史对照仍失败，未改变默认模型。
+
 ## 工程与环境验证
+
+- 当前帧标注隔离通过完整本机工作区 **766 项回归**（10.50 s），其中已跟踪的 725 项全部通过，另 41 项属于尚未接入 runner 的独立物体归属模块；该模块不能算线上修复。日志：`artifacts/handoff/regression-m1-annotation-history.log`。
 
 - 同帧标注的最后一次纠错现在识别实测连通性改善：同一图像、参考与角色下，无锚分量在原几何候选域内从不可达变为可连接固定原锚，才能沿用原三答上限继续问一次。没有自动填补区域或放宽接受条件；邻物、背景、机器人、支撑、负点与孔洞反例均覆盖。完整原生回归 **725 项通过**（9.99 s），见 `artifacts/handoff/regression-m1-topology-progress.log`。
 
