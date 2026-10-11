@@ -39,6 +39,16 @@ _MUG_REFINEMENT_INSTRUCTION=(
     'Describe only currently visible material in the reason; do not infer a new camera view or refer to '
     'an earlier image that is not supplied. If the requested material cannot be located confidently, abort.')
 
+_MUG_POSTCLOSE_CONTACT_INSTRUCTION=(
+    'Inspect only the supplied current image after the gripper has closed. '
+    'Verify the SAME mug and its originally requested outer vertical handle bar. '
+    'Return observe with tight object and grasp_part polygons using the existing target_id. '
+    'The object polygon may cover only clearly visible material of that same handle; '
+    'it need not include the complete cup body or hidden surfaces. The grasp_part must '
+    'remain the originally permitted outer bar, not the cup body or another handle segment. '
+    'Use this image directly; do not infer coordinates from an earlier overhead view, '
+    'select a new grasp, move a contact seed, or request camera motion. Omit regions if uncertain.')
+
 
 def _contact_annotation_progressed(previous, current):
     """Authorize a bounded final semantic reply, never accept geometry here."""
@@ -234,10 +244,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
         current_frame_reselection_used=False
         approach_reselection_used=False
         grasp_refinement_frames=set()
-        def contact_annotation(observation,grounded_decision,original_object,original_part,purpose,*,source_supported=False):
+        def contact_annotation(observation,grounded_decision,original_object,original_part,purpose,*,
+                               source_supported=False,permit_postclose_mug=False):
             # One annotation transaction per frame. A second correction is
             # allowed only after measurable geometric progress; no new image.
-            if task!='occluded' or observation.frame_id in contact_association_frames:
+            postclose_mug=(permit_postclose_mug and task=='mug' and config.source_object_ownership
+                and sim.phase=='close')
+            if (task!='occluded' and not postclose_mug) or observation.frame_id in contact_association_frames:
                 return None
             contact_association_frames.add(observation.frame_id)
             identities={g.target_id for g in grounded_decision.groundings
@@ -262,6 +275,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'the originally requested grasp part' if any(g.role=='grasp_part' for g in grounded_decision.groundings)
                     else 'the whole target object'),
                 'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
+            annotation_instruction=INSTRUCTIONS[task]
+            if postclose_mug:
+                # This is a stationary post-close image, not the initial mug
+                # overview or another grasp-localization/view-selection turn.
+                annotation_instruction=_MUG_POSTCLOSE_CONTACT_INSTRUCTION
+                history[-1]['contact_reassociation']['instructions']+=' '+annotation_instruction
             annotation_request=copy.deepcopy(history[-1]['contact_reassociation'])
             previous_diagnostics=None;annotation_diagnostic=None
             if crop is not None:
@@ -281,7 +300,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # complete planning history locally, but send only this
                     # image's annotation transaction (including its repair).
                     annotation_history=copy.deepcopy([history[-1]])
-                    annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],annotation_history,force_observe=True,
+                    annotation=vlm.decide(annotation_observation,annotation_instruction,annotation_history,force_observe=True,
                         observe_purpose='annotation',derived_image_context=image_context if crop is not None else None,
                         annotation_diagnostic=annotation_diagnostic)
                     raw_annotation=annotation.model_dump()
@@ -290,6 +309,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     event('contact_association_decision',preserved_grounding_frame=grounded_decision.frame_id,
                         image_context=image_context,restored_to_source=crop is not None,repair=repair,
                         **annotation.model_dump())
+                    if postclose_mug and annotation.action!='observe':
+                        raise ValueError('post-close mug contact verification requires an observe annotation')
+                    if postclose_mug and not all(any(g.role==role for g in annotation.groundings)
+                            for role in ('object','grasp_part')):
+                        raise ValueError('contact association requires explicit object and grasp_part regions')
                     association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
                         identity,map_.table_z,robot_depths.get(observation.frame_id),source_supported=source_supported)
                     break
@@ -752,7 +776,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     obs=observe(); continue
             grasp,transit,approach=chosen
             source_ownership=None;source_observation=None;current_ownership=[]
-            current_tracked_evidence=[]
+            current_tracked_evidence=[];current_contact_evidence=[]
             registered_source=None
             ownership_enabled=task=='mug' and config.source_object_ownership and record.attempts==0
             identities={g.target_id for g in decision.groundings if g.role=='object'}
@@ -780,6 +804,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             def measured_owned_points():
                 return (np.vstack([item.object_points for item,_ in current_ownership])
                     if current_ownership else np.empty((0,3)))
+            def measured_contact_points():
+                return np.vstack(current_contact_evidence) if current_contact_evidence else np.empty((0,3))
             def register_owned(frame_id):
                 nonlocal ownership_perception_seconds
                 if source_ownership is None:return None
@@ -861,7 +887,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # and any post-lift reserve remain fixed; no extra images appear.
             max_post_views=(post_limit-record.observations if ownership_enabled else reserve_after_close)
             while record.observations<post_limit and post_index<max_post_views:
-                coverage_payload=np.vstack([target,measured_owned_points()])
+                coverage_payload=np.vstack([target,measured_owned_points(),measured_contact_points()])
                 if source_ownership is not None:
                     # Historical source pose is a visibility hypothesis until
                     # current measured geometry supports a rigid registration.
@@ -932,6 +958,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 if ownership_enabled:
                     payload_advice['source_ownership_coverage']={
                         'actual_current_owned_points':len(measured_owned_points()),
+                        'actual_contact_annotation_object_points':len(measured_contact_points()),
                         'historical_owned_points':0 if source_ownership is None else len(source_ownership.object_points),
                         'registered_hypothesis':registered_source is not None,
                         'scope':'View prediction only; no map, contact or FREE changes.'}
@@ -984,6 +1011,20 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     _,target_unique=np.unique(np.round(target/map_.resolution).astype(np.int32),axis=0,return_index=True)
                     target=target[target_unique]
                     map_.set_target(target_part)
+                if ownership_enabled:
+                    association=contact_annotation(obs,decision,original_object,original_part,
+                        'post-close current-image permitted handle-bar verification before lifting',
+                        permit_postclose_mug=True)
+                    if association is not None:
+                        target_part=np.unique(np.vstack([target_part,association.part_points]),axis=0)
+                        map_.set_target(target_part)
+                        # Accepted semantics adds measured collision coverage,
+                        # never a broad map-retirement or ownership operation.
+                        current_contact_evidence.append(association.object_points.copy())
+                        event('postclose_contact_evidence',frame_id=obs.frame_id,
+                            object_points=len(association.object_points),part_points=len(association.part_points),
+                            object_points_do_not_expand_contact=True,source_certificate='current_measured_only',
+                            endpoint_retirement=False)
                 if ownership_enabled and ownership_identity is not None:
                     current_owned=annotate_owned(obs,ownership_reference,'postclose')
                     if current_owned is not None:current_ownership.append((current_owned,obs))
@@ -1020,9 +1061,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
             actual_payload_source=target
             if ownership_enabled:
-                # Current accepted material is observed, but not a new contact
-                # part. Represent it before exact same-source retirement.
-                measured_current=measured_owned_points()
+                # Both strict semantic transactions supply measured collision
+                # and source surfaces, separate from the permitted part. Only
+                # the ownership transaction authorizes exact retirement below.
+                measured_current=np.vstack([measured_owned_points(),measured_contact_points()])
                 if len(measured_current):
                     planner.add_observed_payload(measured_current,p,R)
                     actual_payload_source=np.vstack([actual_payload_source,measured_current])
