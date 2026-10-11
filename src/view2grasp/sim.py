@@ -31,7 +31,11 @@ INSTRUCTIONS = {
             "Omit optional grasp_contact and point fields so calibrated depth can select an interior material point "
             "inside that region; do not reuse coordinates from earlier images. Leave clearance "
             "above and below for the complete fingers and hand, not only the fingertip contact."),
-    "occluded": "Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles.",
+    "occluded": ("Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles. "
+                 "Any solid face of the blue block may contact the fingers. In object and grasp_part annotations, "
+                 "include all clearly visible blue-block faces, including sides; do not restrict grasp_part to its top face. "
+                 "The object and grasp_part regions may be identical for this solid block, but must exclude the table, "
+                 "robot and other objects. Annotate only visible material."),
 }
 
 

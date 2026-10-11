@@ -32,6 +32,38 @@ def leading_shell(points,resolution=.005):
     return points[order[first]]
 
 
+def _current_frame_reselection_reason(ranking):
+    """A bounded search limitation, never a global infeasibility certificate."""
+    if not isinstance(ranking,dict) or ranking.get('status')!='complete':return None
+    total=ranking.get('input_candidates',0)
+    if total<=0 or ranking.get('checked_candidates')!=total or ranking.get('incomplete_candidates')!=0:
+        return None
+    clear=ranking.get('nominal_clear_candidates',0)
+    blocked=ranking.get('nominal_blocked_candidates',0)
+    if clear+blocked!=total:return None
+    if blocked==total:return 'all nominal gripper approaches intersect observed obstacles'
+    # A truncated priority subset or interrupted IK search cannot establish
+    # that all observed-clear hypotheses failed, even within this candidate set.
+    if (clear>0 and ranking.get('selected_priority_candidates')==clear and
+            ranking.get('priority_candidates_completed')==clear and
+            ranking.get('priority_pregrasp_ik_attempts')==8*clear and
+            ranking.get('priority_pregrasp_ik_solutions')==0):
+        return 'all nominally unblocked candidates exhausted pregrasp IK seeds'
+    return None
+
+
+def _validate_current_frame_reselection(obs,decision):
+    if decision.frame_id!=obs.frame_id or decision.camera_id!=obs.camera_id:
+        raise ValueError('current-frame reselection returned stale frame or camera')
+    if decision.action not in ('grasp','observe','abort'):
+        raise ValueError('current-frame reselection requires grasp, observe or abort')
+    if decision.action=='grasp':
+        roles={g.role for g in decision.groundings if g.source=='vlm' and g.kind!='candidate'
+            and g.frame_id==obs.frame_id and g.camera_id==obs.camera_id}
+        if not {'object','grasp_part'}<=roles:
+            raise ValueError('current-frame reselection requires fresh explicit object and grasp_part proposals')
+
+
 def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,config=None):
     config=config or ExperimentConfig()
     out=Path(root)/f"{task}_{strategy}_{seed:04d}"
@@ -108,7 +140,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'No coverage-only view is prescribed for handle grounding. Infer the handle plane from this image and choose the reachable -X-side broadside described in the task.'})
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
-        def contact_annotation(observation,grounded_decision,original_object,original_part,purpose):
+        current_frame_reselection_used=False
+        def contact_annotation(observation,grounded_decision,original_object,original_part,purpose,*,source_supported=False):
             # One annotation transaction per frame. A second correction is
             # allowed only after measurable geometric progress; no new image.
             if task!='occluded' or observation.frame_id in contact_association_frames:
@@ -161,7 +194,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         image_context=image_context,restored_to_source=crop is not None,repair=repair,
                         **annotation.model_dump())
                     association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
-                        identity,map_.table_z,robot_depths.get(observation.frame_id))
+                        identity,map_.table_z,robot_depths.get(observation.frame_id),source_supported=source_supported)
                     break
                 except (ValueError,RuntimeError) as exc:
                     diagnostics=getattr(exc,'diagnostics',None)
@@ -220,7 +253,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             return association
         def reassociate_contacts(observation,grounded_decision,original_object,original_part,target,target_part):
             association=contact_annotation(observation,grounded_decision,original_object,original_part,
-                'pre-close contact recovery for the static scene')
+                'pre-close contact recovery for the static scene',source_supported=True)
             if association is None:return target,target_part
             # Keep measured points exactly: rounding representatives could
             # discard the newly observed side endpoint needed by the map.
@@ -467,6 +500,44 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         preserved_grounding_frame=decision.frame_id)
                     if chosen is None:
                         record.failure="planning: "+retry_feedback
+                        ranking=getattr(planner,'geometry_ranking',None)
+                        reselection_reason=_current_frame_reselection_reason(ranking)
+                        if (task=='mug' and strategy=='active' and not current_frame_reselection_used and
+                                obs.frame_id!=decision.frame_id and record.observations<pregrasp_limit and
+                                reselection_reason is not None):
+                            # This image has already been acquired and integrated.
+                            # Explicitly end the old ray transaction before asking
+                            # for fresh semantics; retain the final mapping slot.
+                            current_frame_reselection_used=True
+                            advice={'purpose':'current_frame_reselection','frame_id':obs.frame_id,
+                                'camera_id':obs.camera_id,'current_view':list(obs.view),
+                                'retired_grounding_frame_id':decision.frame_id,
+                                'reason':reselection_reason,'geometry_ranking':copy.deepcopy(ranking),
+                                'failure_counts':dict(planner.failure_counts),
+                                'previous_observed_contact_world_m':candidates[0].surface_point.tolist(),
+                                'retired_camera_to_contact_ray':candidates[0].approach.tolist(),
+                                'remaining_pregrasp_observations':pregrasp_limit-record.observations,
+                                'reserved_post_close_observations':reserve_after_close,
+                                'acquires_new_observation':False,
+                                'scope':'Observed geometry and bounded candidate-search evidence only; '
+                                    'nominal collision and failed IK seeds do not prove global infeasibility.',
+                                'next_step':'End the previous mapping-only grasp transaction. Inspect this CURRENT '
+                                    'already-acquired image and freshly ground the complete visible object and '
+                                    'requested grasp_part to form a NEW camera-to-contact ray. Do not copy old '
+                                    'pixels or execute the prior contact with a changed ray. If semantics are '
+                                    'uncertain, observe within the remaining allowance or abort. All ordinary '
+                                    'grounding, candidate, UNKNOWN, collision and path checks remain required.'}
+                            history.append({'current_frame_reselection':advice})
+                            event('current_frame_reselection_advice',**advice)
+                            fresh=vlm.decide(obs,INSTRUCTIONS[task],history,current_frame_reselection=advice)
+                            event('current_frame_reselection_decision',**fresh.model_dump())
+                            try:_validate_current_frame_reselection(obs,fresh)
+                            except ValueError as exc:
+                                record.failure=str(exc)
+                                event('current_frame_reselection_rejected',feedback=str(exc))
+                                break
+                            pending_decision=fresh
+                            continue
                         remaining_unknown=planner.recovery_unknown()
                         followup=None
                         if len(remaining_unknown) and record.observations<pregrasp_limit:
@@ -647,7 +718,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 removed_sets=[]
                 if task=='occluded':
                     association=contact_annotation(obs,decision,original_object,original_part,
-                        'post-close object and permitted-part verification before lifting')
+                        'post-close object and permitted-part verification before lifting',source_supported=True)
                     # Camera-only observations do not advance physics. Keep a
                     # verified post-close association through later mapping
                     # views that cannot see the part; the next physical action

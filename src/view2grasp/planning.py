@@ -619,18 +619,25 @@ class Planner:
         indices={id(g):i for i,g in enumerate(candidates)}
         self.geometry_ranking['selected_priority_candidates']=len(first)
         self.geometry_ranking['selected_candidate_indices']=[indices[id(g)] for g in selected]
+        self.geometry_ranking.update(priority_pregrasp_ik_attempts=0,
+            priority_pregrasp_ik_solutions=0,priority_candidates_completed=0)
         candidates=selected
         for g in candidates:
             pre=g.position-g.approach*.08
+            priority=id(g) in seen
             for attempt in range(8):
+                if self.deadline is not None and time.monotonic()>=self.deadline:
+                    raise PlanningBudgetExceeded
                 seed=q if attempt==0 else np.clip(q+self.rng.normal(0,.25 if attempt<4 else .8,7),self.robot.limits[:,0]+.02,self.robot.limits[:,1]-.02)
                 # Cheap multistart first. Spending the entire budget optimizing
                 # a poorly observed elbow branch prevents testing reachable rolls.
                 qp=self.robot.ik(pre,g.rotation,seed)
+                if priority:self.geometry_ranking['priority_pregrasp_ik_attempts']+=1
                 if qp is None:
                     self.last_failure='pregrasp IK'
                     self.failure_counts[self.last_failure]+=1
                     continue
+                if priority:self.geometry_ranking['priority_pregrasp_ik_solutions']+=1
                 if not self.valid(qp):
                     self.failure_counts['pregrasp: '+self.last_failure]+=1
                     continue
@@ -641,6 +648,7 @@ class Planner:
                 transit=self.plan(q,qp)
                 if transit is not None: return g,transit,approach
                 self.failure_counts[self.last_failure]+=1
+            if priority:self.geometry_ranking['priority_candidates_completed']+=1
         # A single rejected sample must not mask a systematic geometric or IK
         # failure after a recovery view. Ask for more mapping only when unknown
         # space is a material share of the observed candidate failures.

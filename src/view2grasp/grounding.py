@@ -75,11 +75,53 @@ class GroundingSeedError(ValueError):
 
 
 class ContactAssociationError(ValueError):
-    """An unchanged strict rejection with bounded observation-only feedback."""
+    """A semantic/geometric rejection with bounded observation-only feedback."""
     def __init__(self, message, diagnostics):
         self.diagnostics = diagnostics
         # Keep the historical error string for callers and stored failure names.
         super().__init__(message)
+
+
+def _supported_downward_points(points, reference_object, support_z):
+    """Bound measured side surfaces using a fixed observed footprint/support.
+
+    This is available only when the caller establishes the source-supported
+    task phase. It neither completes hidden geometry nor grants contact/free
+    space: original-reference anchors and measured surface connectivity still
+    have to pass independently for each semantic role.
+    """
+    from scipy.spatial import ConvexHull, QhullError
+    points = np.asarray(points)
+    reference = np.asarray(reference_object)
+    eligible = np.zeros(len(points), dtype=bool)
+    evidence = {'source_supported': True,
+        'basis': 'fixed_original_object_xy_hull_and_observed_support',
+        'xy_tolerance_m': .004, 'support_z_m': float(support_z),
+        'minimum_z_exclusive_m': float(support_z + .006),
+        'maximum_z_inclusive_m': float(reference[:, 2].max()),
+        'status': 'unavailable_reference_footprint'}
+    if not np.isfinite(support_z):
+        raise ValueError('supported association requires a finite observed support height')
+    try:
+        hull = ConvexHull(reference[:, :2])
+    except QhullError:
+        # A line or point reference does not define an observed XY footprint.
+        return eligible, evidence
+    polygon = reference[hull.vertices, :2]
+    evidence.update(status='available', original_xy_hull=polygon.tolist())
+    if not len(points): return eligible, evidence
+    xy = points[:, :2]
+    inside = np.all(xy @ hull.equations[:, :2].T + hull.equations[:, 2] <= 0, axis=1)
+    # Euclidean distance to the actual hull, including its corners. Offsetting
+    # half-planes alone would exceed 4 mm near a sharp corner.
+    a, b = polygon, np.roll(polygon, -1, axis=0)
+    edges = b - a
+    delta = xy[:, None, :] - a[None, :, :]
+    fraction = np.clip(np.sum(delta * edges, axis=2) / np.sum(edges * edges, axis=1), 0, 1)
+    distance = np.linalg.norm(delta - fraction[:, :, None] * edges, axis=2).min(axis=1)
+    eligible = ((inside | (distance <= .004)) & (points[:, 2] > support_z + .006)
+        & (points[:, 2] <= reference[:, 2].max()))
+    return eligible, evidence
 
 
 def _contact_subset_diagnostics(obs, object_mask, part_mask):
@@ -111,7 +153,7 @@ def _contact_subset_diagnostics(obs, object_mask, part_mask):
 def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed,
                          accepted, xyz, depth_valid, support_clear, robot_clear,
                          robot_depth, distances, rejected_pixels, rejected_count,
-                         component_count=0):
+                         component_count=0, downward_mask=None, downward_evidence=None):
     """Build detailed feedback only on rejection, never on a planning loop."""
     from .geometry import project
     h, w = obs.depth.shape
@@ -137,7 +179,10 @@ def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed
         if accepted[y, x]:
             distance = float(reference_tree.query(xyz[y, x])[0])
             sample['reference_distance_m'] = distance
-            if distance > .035: reasons.append('reference_distance')
+            downward = downward_mask is not None and bool(downward_mask[y, x])
+            if downward_evidence is not None:
+                sample['supported_downward_eligible'] = bool(downward)
+            if distance > .035 and not downward: reasons.append('reference_distance')
             if anchor_count < 4 and distance >= .004: reasons.append('reference_overlap_insufficient')
             if failure == 'unanchored_component': reasons.append('unanchored_component')
         samples.append(sample)
@@ -149,7 +194,9 @@ def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed
     if len(uv):
         lo, hi = np.maximum(uv.min(axis=0), [0, 0]), np.minimum(uv.max(axis=0), [w - 1, h - 1])
         if np.all(lo <= hi): bbox = np.r_[lo / [w - 1, h - 1], hi / [w - 1, h - 1]].tolist()
-    return {'frame_id': int(obs.frame_id), 'camera_id': obs.camera_id,
+    expansion_violations = distances > .035
+    if downward_mask is not None: expansion_violations &= ~downward_mask[accepted]
+    report = {'frame_id': int(obs.frame_id), 'camera_id': obs.camera_id,
         'coordinate_space': 'source_image_normalized_pixel_centers',
         'source_shape_hw': [int(h), int(w)], 'role': role, 'failure': failure,
         'proposed_pixels': int(proposed.sum()), 'valid_pixels': int(accepted.sum()),
@@ -158,7 +205,7 @@ def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed
             'invalid_depth': int((proposed & ~depth_valid).sum()),
             'support': int((proposed & depth_valid & ~support_clear).sum()),
             'robot': int((proposed & ~robot_clear).sum()),
-            'reference_distance': int((distances > .035).sum()),
+            'reference_distance': int(expansion_violations.sum()),
             'reference_overlap_insufficient': int((~anchors).sum()) if anchor_count < 4 else 0,
             'unanchored_component': int(component_count)},
         'rejected_pixel_count': int(rejected_count), 'rejected_samples': samples,
@@ -168,6 +215,9 @@ def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed
         'thresholds': {'support_clearance_m': .006, 'robot_clearance_m': .003,
             'reference_anchor_m': .004, 'reference_expansion_m': .035,
             'component_step_m': .006, 'min_valid_pixels': 4, 'min_anchor_pixels': 4}}
+    if downward_evidence is not None:
+        report['supported_downward_association'] = downward_evidence
+    return report
 
 
 def depth_component(obs, allowed, seeds=(), negative_points=(), support_z=None, robot_depth=None):
@@ -380,20 +430,23 @@ class GroundingResolver:
         finally:self.seconds+=time.monotonic()-start
 
     def reassociate_contact(self,obs,decision,reference_object,reference_part,target_id,
-                            support_z,robot_depth=None):
+                            support_z,robot_depth=None,*,source_supported=False):
         start=time.monotonic()
         try:return self._reassociate_contact(obs,decision,reference_object,reference_part,target_id,
-                                            support_z,robot_depth)
+                                            support_z,robot_depth,source_supported=source_supported)
         finally:self.seconds+=time.monotonic()-start
 
     def _reassociate_contact(self,obs,decision,reference_object,reference_part,target_id,
-                             support_z,robot_depth=None):
+                             support_z,robot_depth=None,*,source_supported=False):
         """Validate fresh semantic regions without selecting a new grasp ray.
 
         Proximity alone cannot authorize contact: a 10 mm neighboring object can
         belong to the tracker's depth component. Require explicit current-frame
         object AND part polygons/masks, with measured overlap to the original
         surfaces. A box or point is insufficient for this permission change.
+        A source-supported phase may associate measured downward faces inside
+        the fixed original object's observed XY footprint and support interval;
+        it still requires the same per-role anchors and 6 mm surface chains.
         """
         from .geometry import unproject
         from scipy.spatial import cKDTree
@@ -427,7 +480,7 @@ class GroundingResolver:
             # that return; being farther than the self-match band is not enough.
             robot_clear=np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
         valid=depth_valid&support_clear&robot_clear
-        clouds={};overlap={}
+        clouds={};overlap={};downward_reports={}
         for role,reference in (('object',reference_object),('grasp_part',reference_part)):
             reference=np.asarray(reference)
             if len(reference)<4 or not np.isfinite(reference).all():
@@ -438,22 +491,33 @@ class GroundingResolver:
             reference_tree=cKDTree(reference)
             distances=reference_tree.query(points)[0]
             point_pixels=np.argwhere(masks[role])
+            downward_mask=None;downward_evidence=None
+            expansion_violations=distances>.035
+            if source_supported:
+                downward,downward_evidence=_supported_downward_points(points,reference_object,support_z)
+                downward_evidence['eligible_beyond_reference_limit_pixels']=int(np.sum(downward&expansion_violations))
+                downward_mask=np.zeros((h,w),dtype=bool);downward_mask[masks[role]]=downward
+                expansion_violations &= ~downward
+                downward_reports[role]=downward_evidence
             def reject(message,failure,rejected_pixels,rejected_count,component_count=0):
                 raise ContactAssociationError(message,_contact_diagnostics(obs,role,failure,
                     reference,reference_tree,proposed,masks[role],xyz,depth_valid,support_clear,
-                    robot_clear,robot_depth,distances,rejected_pixels,rejected_count,component_count))
+                    robot_clear,robot_depth,distances,rejected_pixels,rejected_count,component_count,
+                    downward_mask,downward_evidence))
             if len(points)<4:
                 rejected=np.argwhere(proposed&~valid)
                 reject('contact association has insufficient filtered depth','insufficient_filtered_depth',
                     rejected,len(rejected))
             # Fixed source references prevent incremental association drift. The
             # 4 mm overlap is tighter than the 10 mm independent-neighbor case;
-            # 35 mm bounds new visible faces, not collision/contact tolerances.
+            # 35 mm bounds ordinary new visible faces, not collision/contact
+            # tolerances. A caller-established supported phase can also use the
+            # bounded measured downward surface, without lateral/upward growth.
             anchors=distances<.004
-            if anchors.sum()<4 or np.max(distances)>.035:
+            if anchors.sum()<4 or expansion_violations.any():
                 # Show the expansion violations first, so a single wrong pixel
                 # is not hidden by a much larger discarded support/background.
-                rejected=point_pixels[distances>.035]
+                rejected=point_pixels[expansion_violations]
                 if not len(rejected):rejected=point_pixels[~anchors]
                 reject('contact association is inconsistent with the original observed '+role,
                     'reference_inconsistency',rejected,len(rejected))
@@ -475,11 +539,12 @@ class GroundingResolver:
                     reject('contact association contains an unanchored semantic surface component',
                         'unanchored_component',component_samples,component_count,component_count)
             clouds[role]=points;overlap[role]=int(anchors.sum())
-        return ContactAssociation(masks['object'],masks['grasp_part'],clouds['object'],clouds['grasp_part'],
-            {'frame_id':obs.frame_id,'camera_id':obs.camera_id,'target_id':target_id,
+        report={'frame_id':obs.frame_id,'camera_id':obs.camera_id,'target_id':target_id,
              'source':'explicit_current_frame_semantics+rgbd','original_surface_overlap_pixels':overlap,
              'object_pixels':len(clouds['object']),'part_pixels':len(clouds['grasp_part']),
-             'grasp_ray_changed':False})
+             'grasp_ray_changed':False}
+        if source_supported:report['supported_downward_association']=downward_reports
+        return ContactAssociation(masks['object'],masks['grasp_part'],clouds['object'],clouds['grasp_part'],report)
 
 
 def lift_ground_path(obs, proposal, floor_z, tolerance=.06):

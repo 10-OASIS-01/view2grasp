@@ -120,6 +120,31 @@ def test_geometry_budget_is_capped_at_eight_seconds():
     assert p.geometry_ranking['precheck_budget_seconds']==8.
 
 
+def test_priority_ik_diagnostics_distinguish_complete_failure_from_a_valid_pose():
+    p,r=planner(lambda pts:np.full(len(pts),FREE));r.ik=lambda *args:None
+    assert p.choose(np.zeros(7),[grasp(),grasp(1.18)],prioritize_gripper_geometry=True) is None
+    d=p.geometry_ranking
+    assert d['priority_pregrasp_ik_attempts']==16 and d['priority_candidates_completed']==2
+    assert d['priority_pregrasp_ik_solutions']==0
+    # A returned pose rejected only for UNKNOWN is not a kinematic failure.
+    p,r=planner(lambda pts:np.full(len(pts),UNKNOWN))
+    assert p.choose(np.zeros(7),[grasp()],prioritize_gripper_geometry=True) is None
+    assert p.geometry_ranking['priority_pregrasp_ik_solutions']==8
+    assert p.geometry_ranking['priority_candidates_completed']==1
+
+
+def test_deadline_during_priority_ik_does_not_report_complete_failure(monkeypatch):
+    import view2grasp.planning as module
+    p,r=planner(lambda pts:np.full(len(pts),FREE));clock=[0.]
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
+    def ik(*args):clock[0]+=.3;return None
+    r.ik=ik
+    assert p.choose(np.zeros(7),[grasp()],time_budget=1.,prioritize_gripper_geometry=True) is None
+    assert p.geometry_ranking['priority_pregrasp_ik_attempts']==4
+    assert p.geometry_ranking['priority_candidates_completed']==0
+    assert p.last_failure=='planning budget exhausted: pregrasp IK'
+
+
 def test_priority_fills_from_original_diverse_fallback_without_mutating_candidates():
     p,r=planner(lambda pts:np.where(pts[:,0]<.5,OCCUPIED,FREE))
     candidates=[grasp(.18+j*.008,angle=i*.1,score=i*.01+j*.008) for i in range(20) for j in range(3)]+[grasp(1.18,angle=2.)]

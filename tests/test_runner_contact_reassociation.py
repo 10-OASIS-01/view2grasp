@@ -180,7 +180,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
 
     resolver=GroundingResolver()
     original_reassociate=resolver.reassociate_contact
-    def reassociate(obs,decision,*args):
+    def reassociate(obs,decision,*args,**kwargs):
         evidence.association_shapes.append(obs.depth.shape)
         evidence.association_frames.append(obs.frame_id)
         evidence.association_references.append((args[0].copy(),args[1].copy()))
@@ -190,7 +190,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         if crop_mode=='cropped':
             assert np.array_equal(np.rint(np.asarray(decision.point)*(np.array(sample.depth.shape[::-1])-1)),
                 evidence.expected_source_pixel)
-        return original_reassociate(obs,decision,*args)
+        return original_reassociate(obs,decision,*args,**kwargs)
     resolver.reassociate_contact=reassociate
     def initial_grounding(obs,decision,*args):
         return SimpleNamespace(decision=decision,object_mask=mask,part_mask=original_part,report={'kinds':['mask']})

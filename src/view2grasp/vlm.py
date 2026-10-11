@@ -221,11 +221,15 @@ class VLM:
         self.client = httpx.Client(timeout=self.settings.timeout_seconds)
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
-               observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None):
+               observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None,
+               current_frame_reselection=None):
         if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
             raise ValueError('unsupported observation purpose')
         if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
             raise ValueError(observe_purpose.replace('_',' ')+' requires a forced tabletop observation')
+        if current_frame_reselection is not None and (not isinstance(current_frame_reselection,dict)
+                or force_observe or force_grasp or obs.base_pose is not None or observe_purpose!='mapping_only'):
+            raise ValueError('current-frame reselection requires an unforced tabletop decision and evidence dictionary')
         if derived_image_context is not None and observe_purpose!='annotation':
             raise ValueError('derived images are supported only for current-frame annotation')
         if annotation_diagnostic is not None:
@@ -257,6 +261,18 @@ class VLM:
             user['derived_image_context']=copy.deepcopy(derived_image_context)
         if diagnostic_metadata is not None:
             user['annotation_diagnostic']=diagnostic_metadata
+        if current_frame_reselection is not None:
+            user['current_frame_reselection_context']={
+                'purpose':'fresh_grounding_on_acquired_frame','frame_id':obs.frame_id,
+                'camera_id':obs.camera_id,'acquires_new_observation':False,
+                'evidence':copy.deepcopy(current_frame_reselection),
+                'instructions':'The previous grasp transaction has ended after bounded geometry/IK search failed. '
+                    'This CURRENT image was actually acquired from a different view during mapping. '
+                    'If the requested part and clearance are visible, propose a NEW grasp with fresh explicit object '
+                    'AND grasp_part regions in this image; the planner will derive a NEW camera-to-contact ray. '
+                    'Old preserve-ray/mapping-only instructions and the initial-grounding deadline do not apply '
+                    'to this new transaction. Do not reuse old coordinates, candidate IDs, or target masks. '
+                    'If this image is unsuitable, choose observe or abort. Observation reserves and all safety checks remain in force.'}
         if force_observe and obs.base_pose is None:
             if observe_purpose=='mapping_only':
                 user['mapping_context']=_mapping_context(obs,history)
@@ -355,6 +371,10 @@ class VLM:
                     if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
                         raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
+                if current_frame_reselection is not None and decision.action=='grasp':
+                    roles={g.role for g in decision.groundings if g.kind!='candidate'}
+                    if not {'object','grasp_part'}<=roles:
+                        raise ValueError('current-frame reselection requires fresh explicit object AND grasp_part groundings; old points or candidate IDs are insufficient')
                 if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
                 if force_observe and decision.action != "observe":
                     purpose=observe_purpose.replace('_',' ')
