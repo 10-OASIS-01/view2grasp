@@ -23,6 +23,8 @@ INSTRUCTIONS = {
             "to either side of it so the aperture is broadside, preferring the solution on the world -X / azimuth ±180 side "
             "where the Panda base can reach. State the image-based radial estimate and the derived broadside angle in your "
             "reason; looking directly along the handle's radial direction is not broadside. Use elevation about -10 to 30 degrees. "
+            "If the robot blocks that broadside, first consider a nearby off-axis view on the same base-side half-plane "
+            "that can still expose the aperture, rather than jumping directly to the opposite side of the table. "
             "Represent the mug and open aperture with an object proposal (a polygon hole may exclude the aperture). "
             "The grasp_part must isolate the straight outer vertical handle bar, excluding the cup body and both junctions. "
             "For this thin handle, prefer a tight grasp_part REGION around the vertical midpoint of the straight bar. "

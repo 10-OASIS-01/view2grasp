@@ -141,6 +141,8 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         'success':False,'collision':False,'first_grasp_success':False,'collision_free_success':False}))
     monkeypatch.setattr(runner,'grasp_candidates',lambda *args:([grasp],points.copy()))
     monkeypatch.setattr(runner,'part_cloud',lambda *args:points.copy())
+    monkeypatch.setattr(runner,'check_vertical_part_midpoint',lambda obs,*args,**kwargs:
+        {'frame_id':obs.frame_id,'status':'unresolved'})
     monkeypatch.setattr(runner,'cloud',lambda obs:points)
     monkeypatch.setattr(runner,'fit_table',lambda *args:0.)
     monkeypatch.setattr(runner,'suggest_views',advice)

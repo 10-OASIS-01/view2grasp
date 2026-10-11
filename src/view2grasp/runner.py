@@ -17,6 +17,7 @@ from .reachability_advisor import suggest_reachable_views
 from .observation_policy import tabletop_view
 from .observation_crop import crop_observation
 from .grounding import ContactAssociationError,GroundingResolver,track_surface
+from .grasp_semantics import check_vertical_part_midpoint
 
 
 def leading_shell(points,resolution=.005):
@@ -106,8 +107,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
         def contact_annotation(observation,grounded_decision,original_object,original_part,purpose):
-            # One annotation transaction per acquired frame, with at most one
-            # geometry-informed correction. Neither request moves the camera.
+            # One annotation transaction per frame. A second correction is
+            # allowed only after measurable geometric progress; no new image.
             if task!='occluded' or observation.frame_id in contact_association_frames:
                 return None
             contact_association_frames.add(observation.frame_id)
@@ -134,7 +135,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     else 'the whole target object'),
                 'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
             annotation_request=copy.deepcopy(history[-1]['contact_reassociation'])
-            for repair in range(2):
+            previous_diagnostics=None
+            for repair in range(3):
                 try:
                     annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
                         observe_purpose='annotation',derived_image_context=image_context if crop is not None else None)
@@ -151,8 +153,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     diagnostics=getattr(exc,'diagnostics',None)
                     event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc),
                         repair=repair,diagnostics=diagnostics)
-                    if repair==0 and isinstance(exc,ContactAssociationError):
+                    progressed=(previous_diagnostics is not None and diagnostics is not None and (
+                        (previous_diagnostics['role']=='object' and diagnostics['role']=='grasp_part') or
+                        (diagnostics['anchor_pixels'],-diagnostics['rejected_pixel_count'])>
+                        (previous_diagnostics['anchor_pixels'],-previous_diagnostics['rejected_pixel_count'])))
+                    if isinstance(exc,ContactAssociationError) and (repair==0 or (repair==1 and progressed)):
                         feedback=copy.deepcopy(diagnostics)
+                        previous_diagnostics=diagnostics
                         if crop is not None:
                             h,w=observation.depth.shape;ch,cw=annotation_observation.depth.shape
                             offset=np.asarray(crop.bounds_xyxy[:2])
@@ -170,7 +177,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         history.append({'contact_reassociation':{**annotation_request,
                             'previous_annotation':raw_annotation,'geometry_rejection':feedback,
                             'instructions':annotation_request['instructions']+
-                                ' One correction is allowed on this SAME supplied image. Reinspect the visible material using the rejected pixels and projection hypothesis; these are geometry diagnostics, not semantic labels. You may annotate a smaller clearly identifiable visible surface, but do not blindly delete rejected pixels or guess hidden material. If uncertain, omit regions. All thresholds and contact permissions are unchanged.'}})
+                                ' Correct this SAME supplied image. A second correction is allowed only when geometric agreement improves; there are at most three annotation replies per physical frame. Reinspect the visible material using the rejected pixels and projection hypothesis; these are geometry diagnostics, not semantic labels. You may annotate a smaller clearly identifiable visible surface, but do not blindly delete rejected pixels or guess hidden material. If uncertain, omit regions. All thresholds and contact permissions are unchanged.'}})
                         event('contact_annotation_repair',frame_id=observation.frame_id,
                             image_context=image_context,feedback=feedback)
                         continue
@@ -234,6 +241,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds
                 from .recording import save_grounding_result
                 save_grounding_result(out,obs,resolved)
+                if task=='mug':
+                    semantic_check=check_vertical_part_midpoint(obs,resolved.object_mask,
+                        resolved.part_mask,decision.point)
+                    event('grasp_semantic_check',**semantic_check)
                 candidates,target=grasp_candidates(obs,decision,map_.table_z,robot.pose(obs.q)[1],robot.grasp_center_offset(),map_.surface,resolved.object_mask,resolved.part_mask)
                 if not candidates:raise ValueError('no candidates from observed grasp geometry')
                 target_part=part_cloud(obs,decision,target,resolved.part_mask)
@@ -267,6 +278,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 feedback=planner.last_failure if chosen is None else "planned"
             except ValueError as exc:
                 chosen=None; feedback="grounding: "+str(exc)
+                if hasattr(exc,'diagnostics'):
+                    event('grounding_rejected',diagnostics=exc.diagnostics,reason=str(exc))
+                    history.append({'grounding_rejection':exc.diagnostics})
             planning_elapsed=time.monotonic()-timer
             record.planning_seconds+=planning_elapsed
             checks_delta=planner.checks-checks_before
@@ -275,6 +289,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             if chosen is None:
                 record.failure="planning: "+feedback
                 if record.observations>=pregrasp_limit:
+                    if (strategy=='active' and feedback.startswith('grounding:')
+                            and grounding_repairs.get(obs.frame_id,0)<2):
+                        # Fixing coordinates on the existing image consumes no
+                        # post-close observations. Never accept another camera
+                        # request once the pre-grasp frame limit is reached.
+                        grounding_repairs[obs.frame_id]=grounding_repairs.get(obs.frame_id,0)+1
+                        corrected=vlm.decide(obs,INSTRUCTIONS[task],history,force_grasp=True)
+                        event('final_frame_grounding_repair',repair=grounding_repairs[obs.frame_id],
+                            **corrected.model_dump())
+                        if corrected.action=='grasp':
+                            pending_decision=corrected
+                            continue
                     event('observation_budget_reserved',observations=record.observations,
                         reserved_after_close=reserve_after_close)
                     break
@@ -318,9 +344,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     obs=observe()
                     continue
                 recovery=None
-                recovery_points=planner.recovery_unknown()
-                if not len(recovery_points): recovery_points=planner.best_unknown
-                if (recovery_points is None or not len(recovery_points)) and planner.closest_invalid is not None and planner.closest_invalid.get('unknown'):
+                recovery_points=planner.recovery_unknown() if candidate_search_completed else np.empty((0,3))
+                if candidate_search_completed and not len(recovery_points): recovery_points=planner.best_unknown
+                if candidate_search_completed and (recovery_points is None or not len(recovery_points)) and planner.closest_invalid is not None and planner.closest_invalid.get('unknown'):
                     recovery_points=np.asarray(planner.closest_invalid['points'])
                 # Fallback diagnostic samples may mix UNKNOWN and OCCUPIED.
                 # Additional coverage can address only genuinely unknown space;

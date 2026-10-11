@@ -9,9 +9,9 @@ from view2grasp.types import AgentDecision,GraspCandidate,Observation
 
 
 def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observations=5,repeated_view=False,
-            reachable_views=True):
+            reachable_views=True,semantic_error=False):
     from view2grasp import runner,recording
-    evidence=SimpleNamespace(frames=[],groundings=[],candidates=[],calls=[],events=[],moves=[],reachability=[])
+    evidence=SimpleNamespace(frames=[],groundings=[],candidates=[],calls=[],events=[],moves=[],reachability=[],semantics=[])
     target=np.array([[.04+i*.001,-.12,.90] for i in range(20)])
 
     class Sim:
@@ -108,6 +108,14 @@ def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observ
             'source_frame_id':obs.frame_id,'requires_new_grounding':True,
             'scope':'Kinematics only; no scene clearance or grasp permission.'}
 
+    def semantics(obs,*args,**kwargs):
+        from view2grasp.grasp_semantics import GraspSemanticsError
+        evidence.semantics.append(obs.frame_id)
+        if semantic_error and (semantic_error=='always' or len(evidence.semantics)==1):
+            raise GraspSemanticsError({'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+                'actual_view':list(obs.view),'status':'rejected','reason':'observed semantic contradiction'})
+        return {'frame_id':obs.frame_id,'status':'unresolved'}
+
     monkeypatch.setattr(runner,'Simulator',Sim);monkeypatch.setattr(runner,'RobotModel',Robot)
     monkeypatch.setattr(runner,'DepthMap',Map);monkeypatch.setattr(runner,'Planner',Plan)
     monkeypatch.setattr(runner,'VLM',Decisions)
@@ -120,6 +128,7 @@ def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observ
     monkeypatch.setattr(runner,'fit_table',lambda *args:.8)
     monkeypatch.setattr(runner,'suggest_views',lambda *args,**kwargs:{'views':[[140.,15.,.9]]})
     monkeypatch.setattr(runner,'suggest_reachable_views',reachable)
+    monkeypatch.setattr(runner,'check_vertical_part_midpoint',semantics)
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
     monkeypatch.setattr(runner,'save_episode',lambda out,sim,record,events:evidence.events.extend(events))
@@ -153,6 +162,37 @@ def test_grounding_failure_repairs_same_frame_before_real_ik_reselection(tmp_pat
     assert e.groundings==[1,1,2] and e.frames==[1,2]
     assert not e.calls[1]['kwargs'].get('force_observe')
     assert e.calls[2]['kwargs']['observe_purpose']=='approach_reselection'
+    assert result['observations']==2
+
+
+def test_semantic_part_contradiction_is_corrected_before_any_candidate_search(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,semantic_error=True)
+    assert e.groundings==[1,1,2] and e.semantics==[1,1,2]
+    assert len(e.candidates)==2 and e.calls[1]['frame_id']==1
+    assert not e.calls[1]['kwargs'].get('force_observe')
+    assert any('grounding_rejection' in entry for entry in e.calls[1]['history'])
+    assert result['observations']==2
+
+
+def test_final_frame_semantic_correction_preserves_all_post_close_views(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,max_observations=4,semantic_error=True)
+    assert e.frames==[1] and e.groundings==[1,1] and len(e.candidates)==1
+    assert e.calls[1]['kwargs']=={'force_grasp':True}
+    assert not e.moves and result['observations']==1
+    assert e.events[-1]['reserved_after_close']==3
+
+
+def test_final_frame_semantic_repairs_stop_at_two_without_robot_motion(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,max_observations=4,semantic_error='always')
+    assert e.frames==[1] and e.groundings==[1,1,1] and len(e.calls)==3
+    assert not e.candidates and not e.moves and result['attempts']==0
+
+
+def test_grounding_rejection_does_not_reuse_stale_unknown_geometry(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,failure='unknown',grounding_error=True)
+    assert e.groundings[:2]==[1,1]
+    assert not e.calls[1]['kwargs'].get('force_observe')
+    assert e.calls[2]['kwargs']=={'force_observe':True}
     assert result['observations']==2
 
 
