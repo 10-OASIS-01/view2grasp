@@ -74,6 +74,76 @@ class GroundingSeedError(ValueError):
             ' '+correction+' Candidate pixels are filtered depth only, not semantic correctness or graspability evidence.')
 
 
+class ContactAssociationError(ValueError):
+    """An unchanged strict rejection with bounded observation-only feedback."""
+    def __init__(self, message, diagnostics):
+        self.diagnostics = diagnostics
+        # Keep the historical error string for callers and stored failure names.
+        super().__init__(message)
+
+
+def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed,
+                         accepted, xyz, depth_valid, support_clear, robot_clear,
+                         robot_depth, distances, rejected_pixels, rejected_count,
+                         component_count=0):
+    """Build detailed feedback only on rejection, never on a planning loop."""
+    from .geometry import project
+    h, w = obs.depth.shape
+    anchors = distances < .004
+    anchor_count = int(anchors.sum())
+    rejected_pixels = np.asarray(rejected_pixels, dtype=int).reshape(-1, 2)
+    if len(rejected_pixels) > 12:
+        ids = np.linspace(0, len(rejected_pixels) - 1, 12, dtype=int)
+        rejected_pixels = rejected_pixels[ids]
+    samples = []
+    for y, x in rejected_pixels:
+        reasons = []
+        if not depth_valid[y, x]: reasons.append('invalid_depth')
+        if depth_valid[y, x] and not support_clear[y, x]: reasons.append('support')
+        if robot_depth is not None and not robot_clear[y, x]: reasons.append('robot')
+        sample = {'pixel': [int(x), int(y)],
+            'normalized': [float(x / (w - 1)), float(y / (h - 1))],
+            'reasons': reasons,
+            'depth_m': float(obs.depth[y, x]) if np.isfinite(obs.depth[y, x]) else None}
+        if np.isfinite(xyz[y, x, 2]): sample['world_z_m'] = float(xyz[y, x, 2])
+        if robot_depth is not None:
+            sample['robot_depth_m'] = float(robot_depth[y, x]) if np.isfinite(robot_depth[y, x]) else None
+        if accepted[y, x]:
+            distance = float(reference_tree.query(xyz[y, x])[0])
+            sample['reference_distance_m'] = distance
+            if distance > .035: reasons.append('reference_distance')
+            if anchor_count < 4 and distance >= .004: reasons.append('reference_overlap_insufficient')
+            if failure == 'unanchored_component': reasons.append('unanchored_component')
+        samples.append(sample)
+    # These are projected old observations, not evidence that the reference is
+    # visible or still occupies those pixels in the current image.
+    uv, z = project(reference, obs.K, obs.T_wc)
+    uv = uv[(z > .01) & np.isfinite(uv).all(axis=1)]
+    bbox = None
+    if len(uv):
+        lo, hi = np.maximum(uv.min(axis=0), [0, 0]), np.minimum(uv.max(axis=0), [w - 1, h - 1])
+        if np.all(lo <= hi): bbox = np.r_[lo / [w - 1, h - 1], hi / [w - 1, h - 1]].tolist()
+    return {'frame_id': int(obs.frame_id), 'camera_id': obs.camera_id,
+        'coordinate_space': 'source_image_normalized_pixel_centers',
+        'source_shape_hw': [int(h), int(w)], 'role': role, 'failure': failure,
+        'proposed_pixels': int(proposed.sum()), 'valid_pixels': int(accepted.sum()),
+        'anchor_pixels': anchor_count,
+        'rejection_counts': {
+            'invalid_depth': int((proposed & ~depth_valid).sum()),
+            'support': int((proposed & depth_valid & ~support_clear).sum()),
+            'robot': int((proposed & ~robot_clear).sum()),
+            'reference_distance': int((distances > .035).sum()),
+            'reference_overlap_insufficient': int((~anchors).sum()) if anchor_count < 4 else 0,
+            'unanchored_component': int(component_count)},
+        'rejected_pixel_count': int(rejected_count), 'rejected_samples': samples,
+        'samples_truncated': bool(rejected_count > len(samples)),
+        'reference_projection': {'kind': 'hypothesis_not_current_visibility',
+            'bbox_normalized': bbox, 'intersects_image': bbox is not None},
+        'thresholds': {'support_clearance_m': .006, 'robot_clearance_m': .003,
+            'reference_anchor_m': .004, 'reference_expansion_m': .035,
+            'component_step_m': .006, 'min_valid_pixels': 4, 'min_anchor_pixels': 4}}
+
+
 def depth_component(obs, allowed, seeds=(), negative_points=(), support_z=None, robot_depth=None):
     """4-connected RGB-D surface; invalid depth and depth jumps split components."""
     from .geometry import unproject
@@ -322,42 +392,61 @@ class GroundingResolver:
             raise ValueError('contact part must remain inside the explicit object region')
         h,w=obs.depth.shape;v,u=np.mgrid[:h,:w]
         xyz=unproject(np.stack([u,v],-1),obs.depth,obs.K,obs.T_wc)
-        valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)&np.isfinite(xyz).all(axis=2)
-        valid &= xyz[:,:,2]>support_z+.006
+        depth_valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)&np.isfinite(xyz).all(axis=2)
+        support_clear=xyz[:,:,2]>support_z+.006
+        robot_clear=np.ones((h,w),dtype=bool)
         if robot_depth is not None:
             # Known robot geometry in front of a depth return also invalidates
             # that return; being farther than the self-match band is not enough.
-            valid &= np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
+            robot_clear=np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
+        valid=depth_valid&support_clear&robot_clear
         clouds={};overlap={}
         for role,reference in (('object',reference_object),('grasp_part',reference_part)):
             reference=np.asarray(reference)
             if len(reference)<4 or not np.isfinite(reference).all():
                 raise ValueError('contact association lacks an original observed reference')
-            masks[role] &= valid
+            proposed=masks[role]
+            masks[role]=proposed&valid
             points=xyz[masks[role]]
-            if len(points)<4:raise ValueError('contact association has insufficient filtered depth')
-            distances=cKDTree(reference).query(points)[0]
+            reference_tree=cKDTree(reference)
+            distances=reference_tree.query(points)[0]
+            point_pixels=np.argwhere(masks[role])
+            def reject(message,failure,rejected_pixels,rejected_count,component_count=0):
+                raise ContactAssociationError(message,_contact_diagnostics(obs,role,failure,
+                    reference,reference_tree,proposed,masks[role],xyz,depth_valid,support_clear,
+                    robot_clear,robot_depth,distances,rejected_pixels,rejected_count,component_count))
+            if len(points)<4:
+                rejected=np.argwhere(proposed&~valid)
+                reject('contact association has insufficient filtered depth','insufficient_filtered_depth',
+                    rejected,len(rejected))
             # Fixed source references prevent incremental association drift. The
             # 4 mm overlap is tighter than the 10 mm independent-neighbor case;
             # 35 mm bounds new visible faces, not collision/contact tolerances.
             anchors=distances<.004
             if anchors.sum()<4 or np.max(distances)>.035:
-                raise ValueError('contact association is inconsistent with the original observed '+role)
+                # Show the expansion violations first, so a single wrong pixel
+                # is not hidden by a much larger discarded support/background.
+                rejected=point_pixels[distances>.035]
+                if not len(rejected):rejected=point_pixels[~anchors]
+                reject('contact association is inconsistent with the original observed '+role,
+                    'reference_inconsistency',rejected,len(rejected))
             # Each disconnected semantic island needs its own old-surface
             # evidence; an unrelated island cannot borrow another's overlap.
             anchor_mask=np.zeros((h,w),dtype=bool);anchor_mask[masks[role]]=anchors
             unseen=masks[role].copy()
-            for y,x in np.argwhere(masks[role]):
+            for y,x in point_pixels:
                 if not unseen[y,x]:continue
-                unseen[y,x]=False;stack=[(y,x)];component_anchors=0
+                unseen[y,x]=False;stack=[(y,x)];component_anchors=0;component_count=0;component_samples=[]
                 while stack:
-                    yy,xx=stack.pop();component_anchors+=int(anchor_mask[yy,xx])
+                    yy,xx=stack.pop();component_anchors+=int(anchor_mask[yy,xx]);component_count+=1
+                    if len(component_samples)<12:component_samples.append((yy,xx))
                     for ny,nx in ((yy-1,xx),(yy+1,xx),(yy,xx-1),(yy,xx+1)):
                         if (0<=ny<h and 0<=nx<w and unseen[ny,nx] and
                                 np.linalg.norm(xyz[ny,nx]-xyz[yy,xx])<=.006):
                             unseen[ny,nx]=False;stack.append((ny,nx))
                 if not component_anchors:
-                    raise ValueError('contact association contains an unanchored semantic surface component')
+                    reject('contact association contains an unanchored semantic surface component',
+                        'unanchored_component',component_samples,component_count,component_count)
             clouds[role]=points;overlap[role]=int(anchors.sum())
         return ContactAssociation(masks['object'],masks['grasp_part'],clouds['object'],clouds['grasp_part'],
             {'frame_id':obs.frame_id,'camera_id':obs.camera_id,'target_id':target_id,

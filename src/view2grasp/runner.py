@@ -16,7 +16,7 @@ from .view_advisor import nominal_grasp,swept_unknown,suggest_views
 from .reachability_advisor import suggest_reachable_views
 from .observation_policy import tabletop_view
 from .observation_crop import crop_observation
-from .grounding import GroundingResolver,track_surface
+from .grounding import ContactAssociationError,GroundingResolver,track_surface
 
 
 def leading_shell(points,resolution=.005):
@@ -106,8 +106,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
         def contact_annotation(observation,grounded_decision,original_object,original_part,purpose):
-            # One annotation request per acquired frame in bounded recovery or
-            # verification. This does not move a camera or select a new ray.
+            # One annotation transaction per acquired frame, with at most one
+            # geometry-informed correction. Neither request moves the camera.
             if task!='occluded' or observation.frame_id in contact_association_frames:
                 return None
             contact_association_frames.add(observation.frame_id)
@@ -133,20 +133,49 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'the originally requested grasp part' if any(g.role=='grasp_part' for g in grounded_decision.groundings)
                     else 'the whole target object'),
                 'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
-            try:
-                annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
-                    observe_purpose='annotation',derived_image_context=image_context if crop is not None else None)
-                event('contact_annotation_decision',image_context=image_context,**annotation.model_dump())
-                if crop is not None:annotation=crop.restore_decision(annotation)
-                event('contact_association_decision',preserved_grounding_frame=grounded_decision.frame_id,
-                    image_context=image_context,restored_to_source=crop is not None,
-                    **annotation.model_dump())
-                association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
-                    identity,map_.table_z,robot_depths.get(observation.frame_id))
-            except (ValueError,RuntimeError) as exc:
-                event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc))
-                history.append({'feedback':'Contact reassociation rejected; previous contact permission and original grasp ray remain unchanged: '+str(exc)})
-                return None
+            annotation_request=copy.deepcopy(history[-1]['contact_reassociation'])
+            for repair in range(2):
+                try:
+                    annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
+                        observe_purpose='annotation',derived_image_context=image_context if crop is not None else None)
+                    raw_annotation=annotation.model_dump()
+                    event('contact_annotation_decision',image_context=image_context,repair=repair,**raw_annotation)
+                    if crop is not None:annotation=crop.restore_decision(annotation)
+                    event('contact_association_decision',preserved_grounding_frame=grounded_decision.frame_id,
+                        image_context=image_context,restored_to_source=crop is not None,repair=repair,
+                        **annotation.model_dump())
+                    association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
+                        identity,map_.table_z,robot_depths.get(observation.frame_id))
+                    break
+                except (ValueError,RuntimeError) as exc:
+                    diagnostics=getattr(exc,'diagnostics',None)
+                    event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc),
+                        repair=repair,diagnostics=diagnostics)
+                    if repair==0 and isinstance(exc,ContactAssociationError):
+                        feedback=copy.deepcopy(diagnostics)
+                        if crop is not None:
+                            h,w=observation.depth.shape;ch,cw=annotation_observation.depth.shape
+                            offset=np.asarray(crop.bounds_xyxy[:2])
+                            def to_crop(points):
+                                return ((np.asarray(points)*[w-1,h-1]-offset)/[cw-1,ch-1]).tolist()
+                            feedback['coordinate_space']='supplied_crop_normalized_pixel_centers'
+                            feedback['image_shape_hw']=[ch,cw]
+                            for sample in feedback['rejected_samples']:
+                                sample['source_pixel']=sample.pop('pixel')
+                                sample['normalized']=to_crop(sample['normalized'])
+                            projection=feedback['reference_projection']
+                            if projection['bbox_normalized'] is not None:
+                                bounds=to_crop(np.asarray(projection['bbox_normalized']).reshape(2,2))
+                                projection['bbox_normalized']=np.asarray(bounds).ravel().tolist()
+                        history.append({'contact_reassociation':{**annotation_request,
+                            'previous_annotation':raw_annotation,'geometry_rejection':feedback,
+                            'instructions':annotation_request['instructions']+
+                                ' One correction is allowed on this SAME supplied image. Reinspect the visible material using the rejected pixels and projection hypothesis; these are geometry diagnostics, not semantic labels. You may annotate a smaller clearly identifiable visible surface, but do not blindly delete rejected pixels or guess hidden material. If uncertain, omit regions. All thresholds and contact permissions are unchanged.'}})
+                        event('contact_annotation_repair',frame_id=observation.frame_id,
+                            image_context=image_context,feedback=feedback)
+                        continue
+                    history.append({'feedback':'Contact reassociation rejected; previous contact permission and original grasp ray remain unchanged: '+str(exc)})
+                    return None
             report={**association.report,'purpose':purpose,'preserved_grounding_frame':grounded_decision.frame_id,
                 'image_context':image_context}
             np.savez_compressed(out/f'contact_association_{observation.frame_id:03d}.npz',
@@ -533,7 +562,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 focus_for_advice=None if len(required_points) else focus
                 payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
                     focus_points=focus_for_advice,observed_points=map_.surface,
-                    required_points=required_points if len(required_points) else None)
+                    required_points=required_points if len(required_points) else None,
+                    semantic_focus=target if task=='occluded' else None)
                 history.append({'coverage_advice':payload_advice,
                     'scene_changed_since_observation':post_index==0,'feedback':
                     'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})

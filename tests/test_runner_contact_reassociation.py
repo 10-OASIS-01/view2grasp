@@ -19,6 +19,7 @@ from view2grasp.types import GraspCandidate
     ('overbroad_neighbor',True,False,'default'),('accepted',True,True,'default'),
     ('api_failure',True,True,'default'),('overbroad_neighbor',True,True,'default'),
     ('accepted',False,False,'cropped'),('accepted',False,False,'fallback'),
+    ('repair_then_accept',False,False,'cropped'),
 ])
 def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         tmp_path,monkeypatch,annotation_outcome,post_close,post_lift,crop_mode):
@@ -117,7 +118,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             self.calls=0;self.seconds=0.;self.client=SimpleNamespace(close=lambda:None)
         def decide(self,obs,instruction,history,**kwargs):
             self.calls+=1;evidence.vlm_calls.append((obs.frame_id,kwargs,json.loads(json.dumps(history))))
-            assert self.calls<=(7 if post_close else 3),'annotation must not create an unbounded repair loop'
+            assert self.calls<=(9 if post_close else 4),'annotation must not create an unbounded repair loop'
             if self.calls==1:
                 return annotations(obs,mask,original_part).model_copy(update={'action':'grasp'})
             if 'contact_reassociation' not in history[-1]:
@@ -128,6 +129,18 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             assert kwargs['derived_image_context']==(None if crop_mode=='fallback' else image_context)
             outcome=('accepted' if (post_close and obs.frame_id==2) or
                 (post_lift and obs.frame_id<4) else annotation_outcome)
+            if outcome=='repair_then_accept':
+                repair_context=history[-1]['contact_reassociation'].get('geometry_rejection')
+                if repair_context is None:outcome='overbroad_neighbor'
+                else:
+                    outcome='accepted'
+                    assert repair_context['coordinate_space']=='supplied_crop_normalized_pixel_centers'
+                    x0,y0,x1,y1=image_context['bounds_xyxy']
+                    for rejected in repair_context['rejected_samples']:
+                        source=np.asarray(rejected['source_pixel'])
+                        expected=(source-[x0,y0])/[x1-x0-1,y1-y0-1]
+                        assert np.allclose(rejected['normalized'],expected)
+                    assert 'previous_annotation' in history[-1]['contact_reassociation']
             if outcome=='api_failure':raise RuntimeError('VLM service unavailable in mock')
             proposed_mask=mask.copy()
             if outcome=='overbroad_neighbor':proposed_mask[10+padding:14+padding,12+padding:16+padding]=True
@@ -173,7 +186,12 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     monkeypatch.setattr(runner,'part_cloud',lambda *args:part_reference.copy())
     monkeypatch.setattr(runner,'fit_table',lambda *args:.95)
     monkeypatch.setattr(runner,'nominal_grasp',lambda *args:None)
-    monkeypatch.setattr(runner,'suggest_views',lambda *args,**kwargs:{'views':[[0.,55.,.8]]})
+    def view_advice(*args,**kwargs):
+        if 'required_points' in kwargs:
+            assert len(kwargs['semantic_focus'])>=len(original_object)
+        else:assert 'semantic_focus' not in kwargs
+        return {'views':[[0.,55.,.8]]}
+    monkeypatch.setattr(runner,'suggest_views',view_advice)
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
     monkeypatch.setattr(runner,'time_parameterize',lambda path:path)
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
@@ -185,7 +203,10 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         config=runner.ExperimentConfig(max_observations=4,perception_backend='rgbd'))
 
     assert result['observations']==(4 if post_close else 2)
-    assert result['vlm_calls']==(6 if post_lift else 7 if post_close else 3) and result['attempts']==int(post_close)
+    repairs=[e for e in evidence.events if e['kind']=='contact_annotation_repair']
+    assert result['vlm_calls']==(6 if post_lift else 7 if post_close else 3)+len(repairs)
+    assert result['attempts']==int(post_close)
+    assert len({e['frame_id'] for e in repairs})==len(repairs) # At most one correction per physical frame.
     assert evidence.observations==(list(range(1,5)) if post_close else [1,2])
     assert len(evidence.cameras)==(2 if post_lift else 3 if post_close else 1)
     assert evidence.candidate_lists[0] is evidence.candidate_lists[1]
@@ -196,8 +217,8 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     assert context['original_grounding_frame']==1 and context['frame_id']==2
     assert 'annotation only' in context['instructions']
     if crop_mode=='cropped':
-        assert evidence.annotation_shapes==[(128,128)]
-        assert evidence.association_shapes==[sample.depth.shape]
+        assert evidence.annotation_shapes==[(128,128)]*(1+len(repairs))
+        assert evidence.association_shapes==[sample.depth.shape]*(1+len(repairs))
         assert len(evidence.targets[-1])==16 # The real resolver accepts restored full-image masks.
     elif crop_mode=='fallback':
         assert evidence.annotation_shapes==evidence.association_shapes==[sample.depth.shape]
@@ -237,14 +258,16 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         else:
             assert evidence.lift_checks==0
             assert result['failure']=='execution: post-close object/part association unverified; lift blocked'
-            assert len([e for e in events if e['kind']=='contact_association_rejected'])==2
+            assert len([e for e in events if e['kind']=='contact_association_rejected'])==2+len(repairs)
         return
-    if annotation_outcome=='accepted':
+    if annotation_outcome in ('accepted','repair_then_accept'):
         assert len(evidence.targets)==2 and len(evidence.targets[-1])==16
         assert any(e['kind']=='contact_association' and not e['grasp_ray_changed'] for e in events)
         saved=json.loads((tmp_path/'occluded_active_0003/contact_association_002.json').read_text())
         assert saved['preserved_grounding_frame']==1 and saved['frame_id']==2
         assert saved['image_context']==context['image_context']
+        if annotation_outcome=='repair_then_accept':
+            assert len(repairs)==1 and len(evidence.annotation_shapes)==2
     else:
         assert len(evidence.targets)==1
         assert any(e['kind']=='contact_association_rejected' for e in events)

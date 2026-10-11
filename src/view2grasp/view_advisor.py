@@ -102,14 +102,30 @@ def suggest_mounted_cameras(robot,calibrated_observations,points,budget=3,observ
         'note':'Calibration and robot/observed geometry estimate only. Unvisited camera images were NOT acquired.'}
 
 
+def _semantic_projection(obs,points,view,visible):
+    """Estimate annotation resolution, without claiming current visibility."""
+    uv,_=project(points[visible],obs.K,orbit_pose(*view))
+    pixels=np.unique(np.rint(uv).astype(int),axis=0)
+    span=np.ptp(pixels,axis=0) if len(pixels) else np.zeros(2)
+    minor_span=0.
+    if len(pixels)>=3:
+        centered=pixels-pixels.mean(axis=0)
+        _,_,axes=np.linalg.svd(centered,full_matrices=False)
+        minor_span=float(np.ptp(centered@axes[1]))
+    return {'view':list(view),'visible_reference_points':int(np.count_nonzero(visible)),
+        'unique_visible_pixels':len(pixels),'pixel_span_xy':span.tolist(),
+        'minor_axis_span_pixels':minor_span}
+
+
 def suggest_views(robot,obs,points,budget=3,beam_width=32,focus_points=None,observed_points=None,
-                  required_points=None):
-    if not len(points):return {'views':[],'predicted_coverage':1.,'uncoverable':0}
+                  required_points=None,semantic_focus=None):
+    if not len(points) and (semantic_focus is None or not len(semantic_focus)):
+        return {'views':[],'predicted_coverage':1.,'uncoverable':0}
     # A coarse orbit grid is sufficient because advice is only a visibility
     # prior; the VLM still selects the actual continuous view. Keeping this
     # small also makes failure-triggered advice cheap enough for online use.
     views=[(float(az),float(el),1.3) for el in (-10,0,30,60,80) for az in range(-180,180,30)]
-    masks=[];focus_masks=[];required_masks=[]
+    masks=[];focus_masks=[];required_masks=[];semantic=[];semantic_scores=[]
     for view in views:
         visible=_visible(robot,obs,points,view,observed_points)
         masks.append(int.from_bytes(np.packbits(visible,bitorder='little').tobytes(),'little'))
@@ -119,6 +135,12 @@ def suggest_views(robot,obs,points,budget=3,beam_width=32,focus_points=None,obse
         required_visible=np.zeros(0,dtype=bool) if required_points is None else _visible(
             robot,obs,required_points,view,observed_points)
         required_masks.append(int.from_bytes(np.packbits(required_visible,bitorder='little').tobytes(),'little'))
+        if semantic_focus is not None and len(semantic_focus):
+            detail=_semantic_projection(obs,np.asarray(semantic_focus),view,
+                _visible(robot,obs,semantic_focus,view,observed_points))
+            semantic.append(detail)
+            semantic_scores.append((detail['unique_visible_pixels'],detail['minor_axis_span_pixels']))
+        else:semantic_scores.append((0,0.))
     # Beam search for complementary views rather than three near-identical maxima.
     beam=[(0,0,0,())]
     for _ in range(budget):
@@ -129,12 +151,16 @@ def suggest_views(robot,obs,points,budget=3,beam_width=32,focus_points=None,obse
                 key=tuple(sorted((*chosen,index)));combined=mask|other
                 candidates[key]=(required_mask|other_required,combined,focus_mask|other_focus)
         beam=sorted(((required,mask,focus,key) for key,(required,mask,focus) in candidates.items()),
-            # Whole-arm samples are a hard lexicographic priority. Among views
-            # with equal required coverage, maximize payload sweep and framing.
-            key=lambda v:(v[0].bit_count(),v[1].bit_count(),v[2].bit_count()),reverse=True)[:beam_width]
+            # Required arm and payload coverage remain the first priorities.
+            # A mandatory semantic check needs distinct image pixels, not many
+            # reference points compressed onto the same few grazing-view pixels.
+            # For a set of views, prefer its best individual annotation image;
+            # pixels from different camera projections cannot be added together.
+            key=lambda v:(v[0].bit_count(),v[1].bit_count(),
+                *max(semantic_scores[i] for i in v[3]),v[2].bit_count()),reverse=True)[:beam_width]
     required_mask,mask,focus_mask,chosen=beam[0];all_mask=0
     for other in masks:all_mask|=other
-    result={'views':[views[i] for i in chosen],'predicted_coverage':mask.bit_count()/len(points),
+    result={'views':[views[i] for i in chosen],'predicted_coverage':mask.bit_count()/len(points) if len(points) else 1.,
         'unknown_points':len(points),'uncoverable':len(points)-all_mask.bit_count(),
         'note':'Robot-model visibility estimate only. Unvisited scene images were NOT acquired.'}
     if focus_points is not None and len(focus_points):
@@ -144,4 +170,7 @@ def suggest_views(robot,obs,points,budget=3,beam_width=32,focus_points=None,obse
         for other in required_masks:all_required|=other
         result['predicted_required_coverage']=required_mask.bit_count()/len(required_points)
         result['required_uncoverable']=len(required_points)-all_required.bit_count()
+    if semantic:
+        result['predicted_semantic_focus']=[semantic[i] for i in chosen]
+        result['semantic_focus_note']='Projection of previously observed reference surfaces only; pixel extent is not semantic verification, current visibility, or contact permission.'
     return result

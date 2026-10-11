@@ -127,6 +127,7 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
                 bbox=(0.,0.,1.,1.),part_bbox=(0.,0.,1.,1.))
 
     def advice(*args,budget,**kwargs):
+        assert kwargs.get('semantic_focus') is None # Ordinary block/mug behavior stays unchanged.
         evidence.advice.append(budget)
         return {'views':[{} for _ in range(min(budget,recovery_views))]}
 
