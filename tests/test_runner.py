@@ -34,7 +34,8 @@ def test_observation_grounding_planner_recording_pipeline(tmp_path,monkeypatch):
 
 
 def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
-                    strategy='active',max_observations=9,always_observe=False,task='mug'):
+                    strategy='active',max_observations=9,always_observe=False,task='mug',
+                    rejection_state=0):
     """Exercise the runner's real recovery transaction without rendering or VLM IO."""
     from view2grasp import runner,recording
     evidence=SimpleNamespace(observed=[],executed=[],advice=[],events=[],planning_frames=[],vlm=[])
@@ -72,7 +73,7 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         def __init__(self,resolution):
             self.resolution=resolution;self.surface=points;self.views=[];self.table_z=0.
         def integrate(self,obs,*args):self.views.append(obs)
-        def classify(self,p):return np.zeros(len(p),dtype=np.uint8)
+        def classify(self,p):return np.full(len(p),rejection_state,dtype=np.uint8)
         def certify_home(self,*args):pass
         def certify_robot_state(self,*args):pass
         def set_table(self,*args):pass
@@ -84,17 +85,21 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         def __init__(self,robot,map_,rng):
             self.rng=rng;self.calls=0;self.map=map_;self.checks=0
             self.failure_counts={};self.closest_invalid=None;self.closest_by_failure={}
-            self.last_failure='unknown space';self.best_unknown=points[:1]
+            self.last_failure='unknown space' if rejection_state==0 else 'observed obstacle'
+            # Planner.best_unknown is a historical name for best rejected
+            # samples and can contain occupied geometry as well as unknown.
+            self.best_unknown=points[:1]
         def choose(self,q,candidates,**kwargs):
             self.calls+=1;self.checks=self.calls
             evidence.planning_frames.append(len(self.map.views))
             if planned_on is not None and self.calls>=planned_on:
                 return candidates[0],np.array([q,q]),np.array([q,q])
             return None
-        def recovery_unknown(self):return points[:1]
+        def recovery_unknown(self):return points[:1] if rejection_state==0 else np.empty((0,3))
         def feasible_ik(self,p,R,q,**kwargs):
             # The mock lift remains blocked unless all reserved frames arrived.
-            assert len(self.map.views)==max_observations
+            post_reserve=min(3 if task=='mug' else 2,max_observations-1)
+            assert len(self.map.views)==evidence.planning_frames[-1]+post_reserve
             return q.copy()
         def begin_payload_lift(self):pass
         def end_payload_lift(self):pass
@@ -104,7 +109,10 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         def resolve_grasp(self,obs,decision,*args):
             return SimpleNamespace(decision=decision,report={'kinds':['points']},
                 object_mask=None,part_mask=None)
-        def track(self,*args,**kwargs):return None
+        def track(self,*args,**kwargs):
+            # If planning succeeds before the residual frame is needed, that
+            # unused allowance can provide the final visual verification.
+            return points+[0,0,.13] if evidence.observed[-1][1]=='hold' else None
 
     class Decisions:
         def __init__(self,*args,**kwargs):
@@ -143,25 +151,27 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
     return result,evidence
 
 
-@pytest.mark.parametrize('recovery_views,planned_on,expected_planning_frames',[
-    (4,2,[2,6]), # Full initial recovery allowance, then three post-close views.
-    (3,3,[2,5,6]), # Residual follow-up consumes only the last pre-close frame.
+@pytest.mark.parametrize('recovery_views,planned_on,expected_planning_frames,post_frames',[
+    (4,2,[2,5],[6,7,8]), # Early success leaves a frame for final verification.
+    (4,3,[2,5,6],[7,8,9]), # Replan before using the reserved residual frame.
+    (3,3,[2,5,6],[7,8,9]),
 ])
 def test_mug_mapping_recovery_preserves_three_post_close_views(
-        tmp_path,monkeypatch,recovery_views,planned_on,expected_planning_frames):
+        tmp_path,monkeypatch,recovery_views,planned_on,expected_planning_frames,post_frames):
     result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=recovery_views,
         planned_on=planned_on)
     assert result['observations']==9 and result['attempts']==1 and not result['online']
     assert evidence.planning_frames==expected_planning_frames
-    assert [frame for frame,phase in evidence.observed if phase=='close']==[7,8,9]
+    assert [frame for frame,phase in evidence.observed if phase=='close']==post_frames
     assert 'lift' in evidence.executed
     post=[event for event in evidence.events if event['kind']=='postgrasp_residual']
     assert [event['postgrasp_view_index'] for event in post]==[1,2,3]
     retries=[event for event in evidence.events if event['kind'] in
         ('recovery_planning','retry_recovery_planning')]
     assert all(event['preserved_grounding_frame']==2 for event in retries)
-    if recovery_views==3:
-        assert evidence.advice[:2]==[4,1]
+    assert evidence.advice[0]==3
+    if planned_on==3:
+        assert evidence.advice[:2]==[3,1]
         episode=tmp_path/'mug_active_0003'
         previous=json.loads((episode/'planning_diagnostic_005_recovery.json').read_text())
         residual=json.loads((episode/'planning_diagnostic_006_residual.json').read_text())
@@ -179,9 +189,10 @@ def test_mug_residual_unknown_stops_without_spending_post_close_reserve(
     assert not evidence.executed
     assert evidence.events[-1]['kind']=='observation_budget_reserved'
     assert evidence.events[-1]['reserved_after_close']==3
-    if recovery_views==3:
-        residual=tmp_path/'mug_active_0003/planning_diagnostic_006_residual.json'
-        assert json.loads(residual.read_text())['checks']==len(evidence.planning_frames)==3
+    assert evidence.planning_frames==[2,5,6]
+    assert evidence.advice[:2]==[3,1]
+    residual=tmp_path/'mug_active_0003/planning_diagnostic_006_residual.json'
+    assert json.loads(residual.read_text())['checks']==len(evidence.planning_frames)==3
 
 
 def test_block_recovery_preserves_two_post_close_views(tmp_path,monkeypatch):
@@ -191,6 +202,26 @@ def test_block_recovery_preserves_two_post_close_views(tmp_path,monkeypatch):
     assert evidence.planning_frames==[2,3,4]
     assert [frame for frame,phase in evidence.observed if phase=='close']==[5,6]
     assert 'lift' in evidence.executed
+
+
+def test_last_available_preclose_frame_can_still_be_used(tmp_path,monkeypatch):
+    result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=4,planned_on=2,
+        task='mug',max_observations=6)
+    assert evidence.advice[0]==1
+    assert evidence.planning_frames==[2,3]
+    assert result['observations']==6 and result['attempts']==1
+    assert [frame for frame,phase in evidence.observed if phase=='close']==[4,5,6]
+    assert not any(event['kind']=='retry_recovery_decision' for event in evidence.events)
+
+
+def test_occupied_fallback_does_not_request_unknown_space_mapping(tmp_path,monkeypatch):
+    result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=4,rejection_state=2)
+    assert result['attempts']==0 and result['observations']==2
+    assert result['failure']=='planning: observed obstacle'
+    assert not evidence.advice
+    assert not any(kwargs.get('force_observe') for _,kwargs in evidence.vlm)
+    assert not any(event['kind']=='recovery_view_advice' for event in evidence.events)
+    assert not evidence.executed
 
 
 @pytest.mark.parametrize('strategy',['fixed','random'])

@@ -6,7 +6,7 @@ import numpy as np
 from .sim import Simulator,INSTRUCTIONS
 from .types import EpisodeRecord
 from .geometry import cloud,fit_table,grasp_candidates,pixel_point,project,unproject,part_cloud
-from .mapping import DepthMap
+from .mapping import DepthMap,UNKNOWN
 from .planning import RobotModel,Planner,time_parameterize
 from .vlm import VLM
 from .evaluation import Evaluator
@@ -179,13 +179,23 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 if not len(recovery_points): recovery_points=planner.best_unknown
                 if (recovery_points is None or not len(recovery_points)) and planner.closest_invalid is not None and planner.closest_invalid.get('unknown'):
                     recovery_points=np.asarray(planner.closest_invalid['points'])
+                # Fallback diagnostic samples may mix UNKNOWN and OCCUPIED.
+                # Additional coverage can address only genuinely unknown space;
+                # an observed obstacle needs a different grasp/path instead.
+                if recovery_points is not None and len(recovery_points):
+                    recovery_points=np.asarray(recovery_points)
+                    recovery_points=recovery_points[map_.classify(recovery_points)==UNKNOWN]
                 if recovery_points is not None and len(recovery_points):
                     # Closing moves both the gripper and the target. A single
                     # orbit view cannot in general expose the whole arm corridor
                     # and the leading payload shell (the block run left two arm
                     # and 34 payload voxels unseen). Spend only the shared
                     # pre-close allowance; residual retries obey the same cap.
-                    recovery_budget=pregrasp_limit-record.observations
+                    # Advice covers the currently rejected points, not every
+                    # later approach/RRT sample. Keep one pre-close frame for
+                    # residuals discovered by replanning on the actual RGB-D.
+                    remaining_pregrasp=pregrasp_limit-record.observations
+                    recovery_budget=max(1,remaining_pregrasp-1)
                     recovery=suggest_views(robot,obs,recovery_points,budget=recovery_budget,
                         focus_points=target_part,observed_points=map_.surface)
                     history.append({'coverage_advice':recovery,'feedback':
@@ -199,7 +209,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # Active VLM chooses the next move from the same image and failure feedback.
                 if strategy=="active":
                     steps=1 if recovery is None else min(len(recovery.get('views',[])),
-                        pregrasp_limit-record.observations)
+                        recovery_budget)
                     recovered=False
                     for recovery_index in range(steps):
                         # Unknown-space recovery is mapping-only. A grasp from a
