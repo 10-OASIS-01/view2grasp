@@ -1,5 +1,9 @@
 # Results and limitations
 
+## Receiving-machine validation (2026-10-11)
+
+See the [local handoff validation](handoff-local-validation.zh-CN.md) for new GLM episodes and remaining acceptance. `handoff-block-05` completed an online RGB-D block grasp without recorded collision, lifted approximately 0.1297 m, satisfied the independent success condition for approximately 3.3 s, and replayed all 232 saved states. The other four tasks are not yet accepted on the receiving machine. The original mentor `runs/` archive has not been transferred; historical claims below must not be presented as locally reproduced evidence.
+
 ## Latest handoff status (2026-10-10)
 
 See the [handoff and completion roadmap](HANDOFF.zh-CN.md) for implementation priorities and exact evidence paths. The debugging milestones further below are historical, not the latest status for every task.
