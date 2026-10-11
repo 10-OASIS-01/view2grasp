@@ -2,7 +2,9 @@ import base64
 import hashlib
 import io
 import json
+from dataclasses import replace
 import httpx
+import numpy as np
 import pytest
 from PIL import Image
 from view2grasp.vlm import VLM
@@ -78,6 +80,80 @@ def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
         decision=client.decide(obs,'Inspect the held object',[],force_observe=True)
     finally:client.client.close()
     assert client.calls==1 and decision.observation_camera=='robot0_eye_in_hand'
+    request=json.loads((tmp_path/'call_000.json').read_text())['request']
+    context=json.loads(request['messages'][1]['content'][0]['text'])
+    assert 'tabletop_camera_context' not in context
+
+
+def _orbit_observation(azimuth=0):
+    from view2grasp.geometry import orbit_pose
+    return replace(observation(),rgb=np.zeros((128,256,3),dtype=np.uint8),
+        depth=np.ones((128,256)),K=np.array([[240.,0.,127.5],[0.,180.,63.5],[0.,0.,1.]]),
+        T_wc=orbit_pose(azimuth,60,1.),view=(azimuth,60.,1.))
+
+
+@pytest.mark.parametrize('azimuth,x_direction,y_direction',[
+    (0,(0,1),(1,0)), # +X down and +Y right, not the usual drawing axes.
+    (90,(-1,0),(0,1)),
+    (180,(0,-1),(-1,0)),
+])
+def test_tabletop_calibration_tracks_world_axes_as_camera_orbits(azimuth,x_direction,y_direction):
+    from view2grasp.vlm import _tabletop_camera_context
+    # Deliberately stale display angles: measured T_wc must determine directions.
+    context=_tabletop_camera_context(replace(_orbit_observation(azimuth),view=(0,80,1.3)))
+    axes=context['world_axes_normalized_delta']
+    for axis,expected in (('+X',x_direction),('+Y',y_direction)):
+        vector=np.asarray(axes[axis]);vector/=np.linalg.norm(vector)
+        assert np.allclose(vector,expected,atol=1e-5)
+    assert axes['+Z'][1]<0
+    assert context['reference_normalized_uv']==[.5,.5]
+
+
+def test_camera_axis_deltas_are_normalized_calibrated_displacements():
+    from view2grasp.vlm import _tabletop_camera_context
+    obs=_orbit_observation();context=_tabletop_camera_context(obs)
+    axes=context['world_axes_normalized_delta']
+    # At azimuth 0, +Y is parallel to the image plane, 1 m from the camera:
+    # a 0.1 m shift is 240 * 0.1 = 24 pixels, or 24 / (width-1).
+    assert axes['+Y']==pytest.approx([24/255,0],abs=1e-6)
+    # +X also moves toward this 60-degree elevated camera, reducing depth to
+    # 0.95 m. Its vertical displacement is 0.1*sin(60), with fy=180.
+    assert axes['+X']==pytest.approx([0,180*.1*np.sqrt(3)/2/.95/127],abs=1e-6)
+    assert context['axis_step_m']==.1 and context['reference_world_m']==[-.12,0.,.95]
+    assert 'not object geometry or free-space' in context['scope']
+    scaled_K=obs.K.copy();scaled_K[:2]*=2
+    resized=replace(obs,rgb=np.zeros((255,511,3),dtype=np.uint8),K=scaled_K)
+    assert _tabletop_camera_context(resized)['world_axes_normalized_delta']==axes
+    # Rendering content and scene depth do not participate in calibration hints.
+    assert _tabletop_camera_context(replace(obs,rgb=np.full_like(obs.rgb,255),
+        depth=np.full_like(obs.depth,np.nan)))==context
+
+
+def test_camera_axis_context_is_omitted_for_unrelated_cameras_or_invalid_projection():
+    from view2grasp.vlm import _tabletop_camera_context
+    obs=_orbit_observation()
+    assert _tabletop_camera_context(replace(obs,base_pose=np.zeros(3))) is None
+    assert _tabletop_camera_context(replace(obs,camera_id='api_probe')) is None
+    invalid=obs.K.copy();invalid[0,0]=np.nan
+    assert _tabletop_camera_context(replace(obs,K=invalid)) is None
+    behind=obs.T_wc.copy();behind[:3,3]+=behind[:3,2]*2
+    assert _tabletop_camera_context(replace(obs,T_wc=behind)) is None
+
+
+def test_calibrated_axes_are_serialized_in_tabletop_vlm_request(tmp_path):
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'abort','frame_id':1})}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:client.decide(_orbit_observation(),'Choose a broadside view',[])
+    finally:client.client.close()
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    axes=context['tabletop_camera_context']['world_axes_normalized_delta']
+    assert axes['+Y']==pytest.approx([24/255,0],abs=1e-6)
+    assert 'image-left is NOT automatically world -X' in requests[0]['messages'][0]['content']
 
 
 def test_mapping_context_tracks_only_views_after_latest_advice():

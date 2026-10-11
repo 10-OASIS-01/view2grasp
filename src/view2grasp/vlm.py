@@ -8,9 +8,11 @@ import hashlib
 import math
 from pathlib import Path
 import httpx
+import numpy as np
 from PIL import Image
 from .types import AgentDecision, Observation
 from .vlm_settings import VLMSettings
+from .geometry import project
 
 LEGACY_SYSTEM = '''You control a Franka Panda in a tabletop simulator using only images.
 Return one JSON object (no markdown). Actions: observe, grasp, abort.
@@ -105,6 +107,11 @@ For tabletop observe, specify azimuth [-180,180], elevation [-15,85], distance
 Orbit center [-.12,0,.95]; azimuth 0 is world +X, 90 is +Y. The Panda
 base is on -X. Low broadside views expose mug-handle apertures; overhead views
 often suit blocks. Coverage advice uses only observed geometry and robot model.
+tabletop_camera_context projects known world axes into THIS image. Each delta
+is the normalized image displacement for a +0.1 m world-axis step at the stated
+workspace reference. Use these local directions to infer world-XY azimuth;
+image-left is NOT automatically world -X. They are calibration hints, not an
+object position or observed free space. Side views may collapse horizontal axes.
 For mounted cameras, observe selects observation_camera from available_cameras and optional
 observation_motion: none, turn_left, turn_right, wrist. Motion requires planning;
 do not request a virtual camera teleport. Groundings always refer to the camera
@@ -149,6 +156,27 @@ def _mapping_context(obs,history):
             'unvisited_advised_views':[view for view in offered if key(view) not in seen]}
 
 
+def _tabletop_camera_context(obs):
+    """Project known workspace axes, without inspecting any object or depth."""
+    if obs.base_pose is not None or obs.camera_id!='activeview':return None
+    h,w=obs.rgb.shape[:2]
+    if min(h,w)<2:return None
+    reference=np.array([-.12,0.,.95]);step=.1
+    try:
+        uv,depth=project(np.vstack([reference,reference+step*np.eye(3)]),obs.K,obs.T_wc)
+    except ValueError:return None
+    if np.any(depth<=.01) or not np.isfinite(uv).all():return None
+    scale=np.array([w-1,h-1])
+    delta=(uv[1:]-uv[0])/scale
+    return {'reference_kind':'known camera-orbit workspace center, not a target',
+            'reference_world_m':reference.tolist(),
+            'reference_normalized_uv':np.round(uv[0]/scale,6).tolist(),
+            'axis_step_m':step,
+            'world_axes_normalized_delta':{
+                axis:np.round(vector,6).tolist() for axis,vector in zip(('+X','+Y','+Z'),delta)},
+            'scope':'Local calibration directions only; not object geometry or free-space evidence.'}
+
+
 class VLM:
     def __init__(self, directory: Path, replay=None):
         self.settings = VLMSettings.from_env(require_api_key=replay is None)
@@ -164,6 +192,8 @@ class VLM:
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
         user['allowed_actions']=['observe','grasp','abort'] if obs.base_pose is None else ['observe','navigate','grasp','place','finish','abort']
+        camera_context=_tabletop_camera_context(obs)
+        if camera_context is not None:user['tabletop_camera_context']=camera_context
         if force_observe and obs.base_pose is None:
             user['mapping_context']=_mapping_context(obs,history)
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
