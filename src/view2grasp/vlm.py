@@ -136,6 +136,16 @@ mapping_context exposes the latest advice and which advised views have not
 been acquired in that recovery transaction. Prefer its remaining views over
 remembering the list from older history. These are predicted viewpoints, not
 observed free space; every motion still needs geometric validation.
+approach_reselection_context instead marks a failed kinematic grasp direction.
+Choose a genuinely different semantic observation of the requested graspable part;
+after it is acquired, ground again to select a NEW approach ray. It is not a
+mapping-only transaction and old grasp coordinates do not apply to the new image.
+annotation_context requests regions in the supplied current image only. It does
+not acquire another observation or execute a camera command. If this image is a
+calibrated crop, ALL coordinates refer to that crop's image_size; never reuse old
+full-frame coordinates. The crop location is only a projection hypothesis from
+previous measurements, not proof that the target is visible there. Mark only
+visible requested material and omit regions when you cannot identify it.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
 
@@ -205,9 +215,20 @@ class VLM:
         self.calls = 0; self.seconds = 0.; self.replay = replay
         self.client = httpx.Client(timeout=self.settings.timeout_seconds)
 
-    def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False):
+    def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
+               observe_purpose='mapping_only',derived_image_context=None):
+        if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
+            raise ValueError('unsupported observation purpose')
+        if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
+            raise ValueError(observe_purpose.replace('_',' ')+' requires a forced tabletop observation')
+        if derived_image_context is not None and observe_purpose!='annotation':
+            raise ValueError('derived images are supported only for current-frame annotation')
         image = io.BytesIO(); Image.fromarray(obs.rgb).save(image,format="PNG")
         image_sha256=hashlib.sha256(obs.rgb.tobytes()).hexdigest()
+        image_reference=f'../observations/frame_{obs.frame_id:03d}.png'
+        if derived_image_context is not None:
+            image_reference=f'input_frame_{obs.frame_id:03d}_{image_sha256[:16]}.png'
+            (self.directory/image_reference).write_bytes(image.getvalue())
         user = {"instruction":instruction,"frame_id":obs.frame_id,"camera_id":obs.camera_id,"view":obs.view,
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
@@ -215,8 +236,27 @@ class VLM:
         user['response_contract']=_response_reference_rules(obs)
         camera_context=_tabletop_camera_context(obs)
         if camera_context is not None:user['tabletop_camera_context']=camera_context
+        if derived_image_context is not None:
+            user['derived_image_context']=copy.deepcopy(derived_image_context)
         if force_observe and obs.base_pose is None:
-            user['mapping_context']=_mapping_context(obs,history)
+            if observe_purpose=='mapping_only':
+                user['mapping_context']=_mapping_context(obs,history)
+            elif observe_purpose=='approach_reselection':
+                user['approach_reselection_context']={
+                    'purpose':'approach_reselection','current_view':list(obs.view),
+                    'instructions':'Kinematic search found no valid pregrasp pose for the current camera-to-contact direction. '
+                        'Select a different semantic view that exposes the same requested graspable part from a reachable direction. '
+                        'This ends the failed grasp transaction: the next acquired image requires fresh grounding and a NEW ray. '
+                        'Do not reuse old image coordinates or treat this as mapping-only recovery. '
+                        'This request overrides an earlier initial-grounding deadline; remaining observation and post-close reserves still apply.'}
+            else:
+                user['annotation_context']={
+                    'purpose':'current_frame_annotation','acquires_new_observation':False,
+                    'instructions':'Annotate the requested object and permitted part in this supplied image. '
+                        'Return observe with the CURRENT view fields; no camera command from this reply will execute. '
+                        'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
+                        'All normalized coordinates refer to this image_size, including when it is a crop. '
+                        'A projected crop does not establish visibility or identity. Omit uncertain regions.'}
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
             {"type":"text","text":json.dumps(user)},
             {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]
@@ -277,7 +317,10 @@ class VLM:
                         raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
                 if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
-                if force_observe and decision.action != "observe": raise ValueError("this mapping step requires an observe action to collect additional geometry")
+                if force_observe and decision.action != "observe":
+                    purpose=observe_purpose.replace('_',' ')
+                    detail='annotate the supplied image' if observe_purpose=='annotation' else 'collect additional geometry'
+                    raise ValueError(f'this {purpose} step requires an observe action to {detail}')
                 last_error=None
                 return decision
             except (ValueError, KeyError, httpx.HTTPError) as exc:
@@ -316,7 +359,7 @@ class VLM:
                     if isinstance(message.get("content"),list):
                         for item in message["content"]:
                             if item.get("type")=="image_url":
-                                item["image_url"]["url"]=f"../observations/frame_{obs.frame_id:03d}.png"
+                                item["image_url"]["url"]=image_reference
                 request_log = {"model":logged_model,"connection":connection,
                     "transport":"replay" if self.replay else "online",
                     "context":user,"messages":logged,"repair":repair,

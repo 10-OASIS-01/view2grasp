@@ -92,6 +92,83 @@ def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
     assert 'tabletop_camera_context' not in context
 
 
+def test_ik_observation_reselection_does_not_freeze_the_failed_ray(tmp_path):
+    replies=[{'action':'abort','frame_id':1},
+        {'action':'observe','frame_id':1,'azimuth':-150,'elevation':15,'distance':.9}]
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(replies.pop(0))}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    history=[{'coverage_advice':{'views':[[60,60,1.3]]}},
+        {'feedback':'pregrasp IK; current approach has no tested reachable pose'}]
+    try:
+        decision=client.decide(observation(),'Grasp the handle',history,force_observe=True,
+            observe_purpose='approach_reselection')
+    finally:client.client.close()
+    assert decision.action=='observe' and client.calls==2
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    assert context['must_observe_now'] and not context['must_ground_now']
+    assert 'mapping_context' not in context
+    reselection=context['approach_reselection_context']
+    assert reselection['purpose']=='approach_reselection'
+    assert 'NEW ray' in reselection['instructions']
+    assert context['history']==history
+    assert 'approach reselection step requires an observe action' in requests[1]['messages'][-1]['content']
+
+
+def test_current_frame_crop_annotation_logs_the_actual_input_image(tmp_path):
+    obs=observation()
+    provenance={'source_frame_id':obs.frame_id,'source_camera_id':obs.camera_id,
+        'bounds_xyxy':[20,30,52,62],'source_shape':[100,100]}
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':obs.frame_id,'camera_id':obs.camera_id,
+            'azimuth':obs.view[0],'elevation':obs.view[1],'distance':obs.view[2],
+        })}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        client.decide(obs,'Annotate the same target',[
+            {'coverage_advice':{'views':[[60,60,1.3]]}}],force_observe=True,
+            observe_purpose='annotation',derived_image_context=provenance)
+    finally:client.client.close()
+    request=json.loads((tmp_path/'call_000.json').read_text())['request']
+    context=request['context']
+    assert 'mapping_context' not in context and 'approach_reselection_context' not in context
+    assert context['annotation_context']['acquires_new_observation'] is False
+    assert context['derived_image_context']==provenance
+    logged_image=request['messages'][1]['content'][1]['image_url']['url']
+    assert logged_image.startswith('input_frame_')
+    decoded=np.asarray(Image.open(tmp_path/logged_image).convert('RGB'))
+    assert hashlib.sha256(decoded.tobytes()).hexdigest()==request['image_sha256']
+    sent_data=requests[0]['messages'][1]['content'][1]['image_url']['url'].split(',',1)[1]
+    assert (tmp_path/logged_image).read_bytes()==base64.b64decode(sent_data)
+
+
+def test_crop_context_cannot_change_a_grasp_or_mapping_input(tmp_path):
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='only for current-frame annotation'):
+            client.decide(observation(),'test',[],derived_image_context={})
+    finally:client.client.close()
+    assert client.calls==0
+
+
+@pytest.mark.parametrize('mounted,forced',[(True,True),(False,False)])
+def test_approach_reselection_is_only_a_forced_tabletop_step(tmp_path,mounted,forced):
+    obs=replace(observation(),base_pose=np.zeros(3) if mounted else None)
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='forced tabletop observation'):
+            client.decide(obs,'test',[],force_observe=forced,observe_purpose='approach_reselection')
+        assert client.calls==0
+    finally:client.client.close()
+
+
 @pytest.mark.parametrize('fault',['null_orbit','future_camera','stale_frame','grounding_camera','tool_source'])
 def test_mounted_repair_states_complete_source_contract_and_never_relabels_output(tmp_path,fault):
     obs=replace(observation(),frame_id=17,camera_id='robot0_agentview_left',base_pose=np.zeros(3))

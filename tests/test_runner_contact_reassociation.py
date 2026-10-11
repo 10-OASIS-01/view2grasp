@@ -13,19 +13,30 @@ from view2grasp.geometry import unproject
 from view2grasp.types import GraspCandidate
 
 
-@pytest.mark.parametrize('annotation_outcome,post_close,post_lift',[
-    ('accepted',False,False),('missing_part',False,False),('api_failure',False,False),
-    ('accepted',True,False),('missing_part',True,False),('api_failure',True,False),('overbroad_neighbor',True,False),
-    ('accepted',True,True),('api_failure',True,True),('overbroad_neighbor',True,True),
+@pytest.mark.parametrize('annotation_outcome,post_close,post_lift,crop_mode',[
+    ('accepted',False,False,'default'),('missing_part',False,False,'default'),('api_failure',False,False,'default'),
+    ('accepted',True,False,'default'),('missing_part',True,False,'default'),('api_failure',True,False,'default'),
+    ('overbroad_neighbor',True,False,'default'),('accepted',True,True,'default'),
+    ('api_failure',True,True,'default'),('overbroad_neighbor',True,True,'default'),
+    ('accepted',False,False,'cropped'),('accepted',False,False,'fallback'),
 ])
 def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
-        tmp_path,monkeypatch,annotation_outcome,post_close,post_lift):
+        tmp_path,monkeypatch,annotation_outcome,post_close,post_lift,crop_mode):
     from view2grasp import runner,recording
     sample,xyz,mask,part_reference=scene()
-    original_part=np.zeros_like(mask);original_part[10:14,8:10]=True
+    padding=200 if crop_mode=='cropped' else 0
+    if padding:
+        depth=np.pad(sample.depth,padding,constant_values=2.)
+        K=sample.K.copy();K[:2,2]+=padding
+        sample=replace(sample,rgb=np.pad(sample.rgb,((padding,padding),(padding,padding),(0,0))),depth=depth,K=K)
+        mask=np.pad(mask,padding)
+        v,u=np.mgrid[:depth.shape[0],:depth.shape[1]]
+        xyz=unproject(np.stack([u,v],-1),depth,K,sample.T_wc)
+    original_part=np.zeros_like(mask);original_part[10+padding:14+padding,8+padding:10+padding]=True
+    part_reference=xyz[original_part]
     original_object=xyz[mask]
     evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[],
-        removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[])
+        removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[],annotation_shapes=[],association_shapes=[])
     candidate=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=part_reference[0],grasp_center=part_reference[0])
     original_ray=candidate.approach.copy()
@@ -61,7 +72,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         def set_q(self,*args):pass
         def close(self):pass
 
-    neighbor=xyz[10:14,12:16].reshape(-1,3)
+    neighbor=xyz[10+padding:14+padding,12+padding:16+padding].reshape(-1,3)
     class Map(runner.DepthMap):
         def __init__(self,resolution):
             super().__init__(resolution,workspace_bounds=None)
@@ -111,16 +122,41 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
                 return annotations(obs,mask,original_part).model_copy(update={'action':'grasp'})
             if 'contact_reassociation' not in history[-1]:
                 return annotations(obs,mask).model_copy(update={'groundings':[]})
+            evidence.annotation_shapes.append(obs.depth.shape)
+            assert kwargs['observe_purpose']=='annotation'
+            image_context=history[-1]['contact_reassociation']['image_context']
+            assert kwargs['derived_image_context']==(None if crop_mode=='fallback' else image_context)
             outcome=('accepted' if (post_close and obs.frame_id==2) or
                 (post_lift and obs.frame_id<4) else annotation_outcome)
             if outcome=='api_failure':raise RuntimeError('VLM service unavailable in mock')
             proposed_mask=mask.copy()
-            if outcome=='overbroad_neighbor':proposed_mask[10:14,12:16]=True
-            result=annotations(obs,proposed_mask,original_part if post_close else None)
+            if outcome=='overbroad_neighbor':proposed_mask[10+padding:14+padding,12+padding:16+padding]=True
+            proposed_part=original_part if post_close else None
+            if 'bounds_xyxy' in image_context:
+                x0,y0,x1,y1=image_context['bounds_xyxy']
+                proposed_mask=proposed_mask[y0:y1,x0:x1]
+                if proposed_part is not None:proposed_part=proposed_part[y0:y1,x0:x1]
+                assert np.array_equal(obs.depth,sample.depth[y0:y1,x0:x1]) or post_close
+                assert np.array_equal(obs.K[:2,2],sample.K[:2,2]-[x0,y0])
+            result=annotations(obs,proposed_mask,proposed_part)
+            if crop_mode=='cropped':
+                result=result.model_copy(update={'point':(.5,.5)})
+                evidence.expected_source_pixel=np.array([x0+64,y0+64])
             if outcome=='missing_part':result=result.model_copy(update={'groundings':result.groundings[:1]})
             return result
 
     resolver=GroundingResolver()
+    original_reassociate=resolver.reassociate_contact
+    def reassociate(obs,decision,*args):
+        evidence.association_shapes.append(obs.depth.shape)
+        assert obs.depth.shape==sample.depth.shape
+        assert all(tuple(g.mask_size)==sample.depth.shape for g in decision.groundings)
+        assert args[-1].shape==sample.depth.shape # Original known-robot depth, not the cropped grid.
+        if crop_mode=='cropped':
+            assert np.array_equal(np.rint(np.asarray(decision.point)*(np.array(sample.depth.shape[::-1])-1)),
+                evidence.expected_source_pixel)
+        return original_reassociate(obs,decision,*args)
+    resolver.reassociate_contact=reassociate
     def initial_grounding(obs,decision,*args):
         return SimpleNamespace(decision=decision,object_mask=mask,part_mask=original_part,report={'kinds':['mask']})
     resolver.resolve_grasp=initial_grounding
@@ -142,6 +178,9 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     monkeypatch.setattr(runner,'time_parameterize',lambda path:path)
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
     monkeypatch.setattr(runner,'save_episode',lambda out,sim,record,events:evidence.events.extend(events))
+    if crop_mode=='fallback':
+        def unavailable_crop(*args,**kwargs):raise ValueError('reference projection is outside current image')
+        monkeypatch.setattr(runner,'crop_observation',unavailable_crop)
     result=runner.run_episode('occluded',3,'active',tmp_path,replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=4,perception_backend='rgbd'))
 
@@ -156,6 +195,13 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     context=evidence.vlm_calls[2][2][-1]['contact_reassociation']
     assert context['original_grounding_frame']==1 and context['frame_id']==2
     assert 'annotation only' in context['instructions']
+    if crop_mode=='cropped':
+        assert evidence.annotation_shapes==[(128,128)]
+        assert evidence.association_shapes==[sample.depth.shape]
+        assert len(evidence.targets[-1])==16 # The real resolver accepts restored full-image masks.
+    elif crop_mode=='fallback':
+        assert evidence.annotation_shapes==evidence.association_shapes==[sample.depth.shape]
+        assert any(e['kind']=='contact_annotation_crop_unavailable' for e in evidence.events)
     events=evidence.events
     replans=[e for e in events if e['kind']=='recovery_planning']
     assert len(replans)==1 and replans[0]['preserved_grounding_frame']==1
@@ -198,6 +244,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         assert any(e['kind']=='contact_association' and not e['grasp_ray_changed'] for e in events)
         saved=json.loads((tmp_path/'occluded_active_0003/contact_association_002.json').read_text())
         assert saved['preserved_grounding_frame']==1 and saved['frame_id']==2
+        assert saved['image_context']==context['image_context']
     else:
         assert len(evidence.targets)==1
         assert any(e['kind']=='contact_association_rejected' for e in events)

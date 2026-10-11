@@ -13,7 +13,9 @@ from .evaluation import Evaluator
 from .recording import save_observation,save_episode
 from .config import ExperimentConfig,fingerprint
 from .view_advisor import nominal_grasp,swept_unknown,suggest_views
+from .reachability_advisor import suggest_reachable_views
 from .observation_policy import tabletop_view
+from .observation_crop import crop_observation
 from .grounding import GroundingResolver,track_surface
 
 
@@ -112,17 +114,32 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             identities={g.target_id for g in grounded_decision.groundings
                         if g.role in ('object','grasp_part','grasp_contact')}
             identity=next(iter(identities)) if identities else 'target'
+            crop=None;annotation_observation=observation
+            image_context={'kind':'acquired_observation','source_frame_id':observation.frame_id,
+                'source_camera_id':observation.camera_id,'source_shape_hw':list(observation.depth.shape),
+                'coordinates':'normalized_to_source_pixel_centers','new_observation':False}
+            try:
+                crop=crop_observation(observation,original_object,
+                    robot_depth=robot_depths.get(observation.frame_id))
+                annotation_observation=crop.observation;image_context=crop.provenance()
+            except ValueError as exc:
+                event('contact_annotation_crop_unavailable',frame_id=observation.frame_id,reason=str(exc))
             history.append({'contact_reassociation':{
                 'purpose':purpose+'; annotate the SAME object and originally permitted grasp part, preserving the stored grasp ray and candidates.',
                 'frame_id':observation.frame_id,'camera_id':observation.camera_id,'target_id':identity,
                 'original_grounding_frame':grounded_decision.frame_id,
+                'image_context':image_context,
                 'original_part':grounded_decision.part or (
                     'the originally requested grasp part' if any(g.role=='grasp_part' for g in grounded_decision.groundings)
                     else 'the whole target object'),
-                'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS image, using the same target_id. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
+                'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS supplied image, using the same target_id. All normalized coordinates refer to the supplied image, including when image_context identifies a crop with source bounds. The projected reference only selects image context and does not prove that the object or part is visible. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
             try:
-                annotation=vlm.decide(observation,INSTRUCTIONS[task],history,force_observe=True)
+                annotation=vlm.decide(annotation_observation,INSTRUCTIONS[task],history,force_observe=True,
+                    observe_purpose='annotation',derived_image_context=image_context if crop is not None else None)
+                event('contact_annotation_decision',image_context=image_context,**annotation.model_dump())
+                if crop is not None:annotation=crop.restore_decision(annotation)
                 event('contact_association_decision',preserved_grounding_frame=grounded_decision.frame_id,
+                    image_context=image_context,restored_to_source=crop is not None,
                     **annotation.model_dump())
                 association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
                     identity,map_.table_z,robot_depths.get(observation.frame_id))
@@ -130,7 +147,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc))
                 history.append({'feedback':'Contact reassociation rejected; previous contact permission and original grasp ray remain unchanged: '+str(exc)})
                 return None
-            report={**association.report,'purpose':purpose,'preserved_grounding_frame':grounded_decision.frame_id}
+            report={**association.report,'purpose':purpose,'preserved_grounding_frame':grounded_decision.frame_id,
+                'image_context':image_context}
             np.savez_compressed(out/f'contact_association_{observation.frame_id:03d}.npz',
                 object_mask=association.object_mask,part_mask=association.part_mask,
                 object_points=association.object_points,part_points=association.part_points)
@@ -179,7 +197,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # history.
                 history.append({"view":obs.view,"decision":decision.model_dump(),
                     "feedback":"requested new observation"}); obs=observe(); continue
-            timer=time.monotonic()
+            timer=time.monotonic();candidate_search_completed=False;checks_before=planner.checks
             try:
                 resolved=resolver.resolve_grasp(obs,decision,map_.table_z,robot_depths.get(obs.frame_id))
                 decision=resolved.decision
@@ -212,6 +230,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     grasp_center_offset=robot.grasp_center_offset())
                 planning_rng_state=copy.deepcopy(planner.rng.bit_generator.state)
                 chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,time_budget=config.planning_seconds)
+                candidate_search_completed=True
                 (out/f'planning_diagnostic_{obs.frame_id:03d}.json').write_text(json.dumps({
                     'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
                     'closest_by_failure':planner.closest_by_failure,
@@ -219,8 +238,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 feedback=planner.last_failure if chosen is None else "planned"
             except ValueError as exc:
                 chosen=None; feedback="grounding: "+str(exc)
-            record.planning_seconds+=time.monotonic()-timer
-            event("planning",feedback=feedback,checks=planner.checks)
+            planning_elapsed=time.monotonic()-timer
+            record.planning_seconds+=planning_elapsed
+            checks_delta=planner.checks-checks_before
+            event("planning",feedback=feedback,checks=planner.checks,checks_delta=checks_delta)
             history.append({"view":obs.view,"feedback":feedback})
             if chosen is None:
                 record.failure="planning: "+feedback
@@ -228,6 +249,45 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     event('observation_budget_reserved',observations=record.observations,
                         reserved_after_close=reserve_after_close)
                     break
+                if (strategy=='active' and candidate_search_completed and checks_delta==0 and
+                        feedback=='pregrasp IK' and set(planner.failure_counts)=={'pregrasp IK'} and
+                        planner.failure_counts['pregrasp IK']>0):
+                    # No candidate reached a spatial validity check. More map
+                    # coverage cannot repair this ray's failed IK; acquire a
+                    # fresh semantic view before proposing a different ray.
+                    contact=np.asarray(anchor);ray=contact-obs.T_wc[:3,3]
+                    ray=ray/np.linalg.norm(ray)
+                    timer=time.monotonic()
+                    kinematic_advice=suggest_reachable_views(robot,obs,contact,target_part,map_.surface,
+                        budget=3,max_ik_calls=72,time_budget=min(4.,max(0.,config.planning_seconds-planning_elapsed)))
+                    record.planning_seconds+=time.monotonic()-timer
+                    advice={'purpose':'approach_reselection','frame_id':obs.frame_id,
+                        'camera_id':obs.camera_id,'current_view':list(obs.view),
+                        'observed_contact_world_m':contact.tolist(),
+                        'camera_to_contact_ray':ray.tolist(),'approach_cone_degrees':15,
+                        'failure_counts':dict(planner.failure_counts),'checks_delta':checks_delta,
+                        'generated_candidates':len(candidates),
+                        'kinematic_view_advice':kinematic_advice,
+                        'remaining_pregrasp_observations':pregrasp_limit-record.observations,
+                        'reserved_post_close_observations':reserve_after_close,
+                        'scope':'Observed contact and bounded robot-kinematics failures only; no map clearance or global infeasibility claim.',
+                        'next_step':'Choose a different calibrated view for a NEW semantic grounding and approach ray. Seeing the handle does not establish robot reachability. Consider nearby alternatives to a self-occluded view, not only its opposite side. The initial grounding deadline does not prohibit this recovery. This is not mapping-only: after the new image, re-ground object and grasp_part from that image; never execute the old contact with a silently changed ray.'}
+                    history.append({'approach_reselection':advice})
+                    event('approach_reselection_advice',**advice)
+                    next_decision=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True,
+                        observe_purpose='approach_reselection')
+                    event('approach_reselection_decision',**next_decision.model_dump())
+                    if next_decision.action!='observe':break
+                    selected=np.array([next_decision.azimuth,next_decision.elevation,next_decision.distance])
+                    delta=selected-np.asarray(obs.view);delta[0]=(delta[0]+180)%360-180
+                    if np.all(np.abs(delta)<1e-6):
+                        record.failure='planning: pregrasp IK; approach recovery repeated the current view'
+                        break
+                    sim.move_camera(*selected)
+                    history.append({'view':obs.view,'decision':next_decision.model_dump(),
+                        'feedback':'Acquiring a new semantic view after pure pregrasp IK failure; retire the old approach ray and re-ground from the next current image.'})
+                    obs=observe()
+                    continue
                 recovery=None
                 recovery_points=planner.recovery_unknown()
                 if not len(recovery_points): recovery_points=planner.best_unknown
