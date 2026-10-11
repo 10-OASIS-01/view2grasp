@@ -29,7 +29,9 @@ def test_repairs_bad_json_and_stale_frame_without_logging_secret(tmp_path,monkey
     monkeypatch.setenv('VLM_API_KEY','secret-for-test')
     responses=['not json',json.dumps({'action':'abort','frame_id':99}),json.dumps({'action':'abort','frame_id':1,'reason':'unreachable'})]
     client=VLM(tmp_path);client.client.close()
+    requests=[]
     def handler(request):
+        requests.append(json.loads(request.content))
         return httpx.Response(200,json={'model':'test-model','choices':[{'message':{'content':responses.pop(0)}}]})
     client.client=httpx.Client(transport=httpx.MockTransport(handler))
     answer=client.decide(observation(),'test',[])
@@ -37,6 +39,11 @@ def test_repairs_bad_json_and_stale_frame_without_logging_secret(tmp_path,monkey
     records=[p.read_text() for p in sorted(tmp_path.glob('*.json'))]
     assert all('secret-for-test' not in text for text in records)
     assert json.loads(records[-1])['error'] is None
+    assert [len(json.loads(row)['request']['messages']) for row in records]==[2,4,6]
+    for raw_record,request in zip(records,requests):
+        sent=json.loads(json.dumps(request['messages']))
+        sent[1]['content'][1]['image_url']['url']='../observations/frame_001.png'
+        assert json.loads(raw_record)['request']['messages']==sent
     messages=json.loads(records[-1])['request']['messages']
     assert len(messages)==6
     assert messages[2]=={'role':'assistant','content':'not json'}
@@ -83,6 +90,66 @@ def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
     request=json.loads((tmp_path/'call_000.json').read_text())['request']
     context=json.loads(request['messages'][1]['content'][0]['text'])
     assert 'tabletop_camera_context' not in context
+
+
+@pytest.mark.parametrize('fault',['null_orbit','future_camera','stale_frame','grounding_camera','tool_source'])
+def test_mounted_repair_states_complete_source_contract_and_never_relabels_output(tmp_path,fault):
+    obs=replace(observation(),frame_id=17,camera_id='robot0_agentview_left',base_pose=np.zeros(3))
+    valid={'action':'observe','frame_id':17,'camera_id':obs.camera_id,
+        'observation_camera':'robot0_nav_front','observation_motion':'none',
+        'groundings':[{'kind':'points','role':'object','frame_id':17,'camera_id':obs.camera_id,
+                       'source':'vlm','points':[[.5,.5]]}]}
+    bad=json.loads(json.dumps(valid))
+    if fault=='null_orbit':
+        # Reproduce the real first navigation response: both null orbit fields
+        # and an incorrect top-level future camera must be fixed in one repair.
+        bad.update(azimuth=None,elevation=None,distance=None,camera_id='robot0_nav_front')
+    elif fault=='future_camera':
+        bad['camera_id']='robot0_nav_front';bad['groundings'][0]['camera_id']='robot0_nav_front'
+    elif fault=='stale_frame':
+        bad['frame_id']=16;bad['groundings'][0]['frame_id']=16
+    elif fault=='grounding_camera':bad['groundings'][0]['camera_id']='robot0_nav_front'
+    else:bad['groundings'][0]['source']='rgbd'
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        response=bad if len(requests)==1 else valid
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(response)}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        decision=client.decide(obs,'Navigate to the oven',[
+            {'available_cameras':[obs.camera_id,'robot0_nav_front']}])
+    finally:client.client.close()
+    assert client.calls==2 and decision.camera_id==obs.camera_id
+    assert decision.observation_camera=='robot0_nav_front'
+    assert not {'azimuth','elevation','distance'} & decision.model_fields_set
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    correction=requests[1]['messages'][-1]['content']
+    for instructions in (context['response_contract'],correction):
+        assert 'frame_id must be 17' in instructions
+        assert 'camera_id must be "robot0_agentview_left"' in instructions
+        assert 'Every grounding must use these exact same' in instructions
+        assert 'ONLY observation_camera names the requested NEXT camera' in instructions
+        assert 'OMIT azimuth, elevation, and distance entirely' in instructions
+        assert 'do not send null' in instructions and 'source="vlm"' in instructions
+    first=json.loads((tmp_path/'call_000.json').read_text())
+    assert first['error'] and len(first['request']['messages'])==2
+    assert json.loads(first['response']['choices'][0]['message']['content'])==bad
+    second=json.loads((tmp_path/'call_001.json').read_text())
+    assert second['error'] is None and len(second['request']['messages'])==4
+
+
+def test_mounted_legacy_numeric_orbit_fields_remain_compatible(tmp_path):
+    obs=replace(observation(),camera_id='robot0_agentview_left',base_pose=np.zeros(3))
+    answer={'action':'observe','frame_id':1,'camera_id':obs.camera_id,
+        'observation_camera':'robot0_nav_front','azimuth':0,'elevation':0,'distance':.55}
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(answer)}}]})))
+    try:decision=client.decide(obs,'Navigate to the oven',[])
+    finally:client.client.close()
+    assert client.calls==1 and decision.observation_camera=='robot0_nav_front'
 
 
 def _orbit_observation(azimuth=0):

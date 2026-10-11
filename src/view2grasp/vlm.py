@@ -79,6 +79,9 @@ SYSTEM = '''You operate a robot using calibrated RGB-D observations, task langua
 proprioception, and planning feedback. Return ONE JSON object without markdown.
 Actions: observe, navigate, grasp, place, finish, abort. Always include action,
 frame_id, camera_id, and a short operational reason. Use only the current image.
+Top-level frame_id and camera_id ALWAYS identify the CURRENT INPUT image,
+including for observe actions. Every grounding uses those same input IDs.
+NEVER put a requested future camera in top-level camera_id or in a grounding.
 groundings is a list of associated visual proposals. Each proposal includes:
 kind (points, box, polygon, path), role, frame_id, camera_id, target_id, source="vlm".
 roles: object, grasp_part, grasp_contact, place_region, navigation_goal,
@@ -114,8 +117,11 @@ image-left is NOT automatically world -X. They are calibration hints, not an
 object position or observed free space. Side views may collapse horizontal axes.
 For mounted cameras, observe selects observation_camera from available_cameras and optional
 observation_motion: none, turn_left, turn_right, wrist. Motion requires planning;
-do not request a virtual camera teleport. Groundings always refer to the camera
-of the supplied image, even when observe requests a different camera separately.
+do not request a virtual camera teleport. ONLY observation_camera identifies the
+requested NEXT camera; top-level camera_id and all grounding camera_id values
+still identify the camera of the supplied image. For every mounted-camera
+response OMIT azimuth, elevation, and distance entirely. They are tabletop-only
+fields: do not send null or numeric placeholders for them.
 If must_ground_now is true, grasp or abort. If must_observe_now is true, observe.
 Unknown-space rejection means acquire relevant additional observations. Respect
 remaining budgets. finish reports a visual hypothesis, not evaluator success.
@@ -132,6 +138,20 @@ remembering the list from older history. These are predicted viewpoints, not
 observed free space; every motion still needs geometric validation.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
+
+
+def _response_reference_rules(obs):
+    reference=(f'For this CURRENT INPUT, top-level frame_id must be {obs.frame_id} '
+        f'and top-level camera_id must be {json.dumps(obs.camera_id)}. '
+        'Every grounding must use these exact same frame_id and camera_id values, '
+        'with source="vlm". These source IDs do not change when requesting another view. ')
+    if obs.base_pose is not None:
+        return reference+('This is a mounted-camera observation. ONLY observation_camera names '
+            'the requested NEXT camera, chosen from available_cameras. OMIT azimuth, elevation, '
+            'and distance entirely; do not send null or numeric placeholders. '
+            'observation_motion may be none, turn_left, turn_right, or wrist.')
+    return reference+('For tabletop observe, include explicit numeric azimuth, elevation, '
+        'and distance fields; the reason text alone does not move the camera.')
 
 
 def _mapping_context(obs,history):
@@ -192,6 +212,7 @@ class VLM:
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
         user['allowed_actions']=['observe','grasp','abort'] if obs.base_pose is None else ['observe','navigate','grasp','place','finish','abort']
+        user['response_contract']=_response_reference_rules(obs)
         camera_context=_tabletop_camera_context(obs)
         if camera_context is not None:user['tabletop_camera_context']=camera_context
         if force_observe and obs.base_pose is None:
@@ -201,7 +222,10 @@ class VLM:
             {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]
         last_error = None
         for repair in range(3):
-            payload = {"model":self.settings.model,"messages":messages,**self.settings.request_options()}
+            # A rejected answer and its correction are added to the *next*
+            # request. Keep this call's audit log identical to what was sent.
+            request_messages=copy.deepcopy(messages)
+            payload = {"model":self.settings.model,"messages":request_messages,**self.settings.request_options()}
             index = self.calls; self.calls += 1
             start = time.monotonic()
             response = None
@@ -282,11 +306,12 @@ class VLM:
                     previous = choices[0].get('message') if isinstance(choices,list) and choices and isinstance(choices[0],dict) else None
                     if isinstance(previous,dict) and isinstance(previous.get('content'),str):
                         messages.append({'role':'assistant','content':self.settings.redact(previous['content'])})
-                    messages.append({"role":"user","content":"Correct your JSON response: "+last_error})
+                    messages.append({"role":"user","content":"Correct your JSON response: "+last_error+
+                        '\n'+user['response_contract']})
             finally:
                 elapsed = time.monotonic()-start; self.seconds += elapsed
                 # Credentials are never recorded. Image is stored separately in observations.
-                logged=copy.deepcopy(messages)
+                logged=copy.deepcopy(request_messages)
                 for message in logged:
                     if isinstance(message.get("content"),list):
                         for item in message["content"]:
