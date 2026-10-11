@@ -1,0 +1,10 @@
+# M1 development: initialize object identity from two acquired static views.
+# Adds an explicit pre-execution semantic transaction; contact and subsequent
+# reassociation/retirement rules keep their original independent references.
+image_size: 1024
+max_observations: 10
+planning_seconds: 120
+refine_grasp_grounding: true
+source_object_ownership: true
+initial_multiview_reference: true
+diversify_grasp_attempts: true

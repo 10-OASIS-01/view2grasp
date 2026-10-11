@@ -18,7 +18,8 @@ def _contains(haystack, needles):
 
 def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                   registration_ok=True, tracked_current=False, enabled=True, task='mug',
-                  complete_lift=False, max_observations=4):
+                  complete_lift=False, max_observations=4, initialize_reference=False,
+                  initialization_ok=True, initial_identity=True):
     from view2grasp import recording, runner
     sample, xyz, mask, original = scene()
     part_mask = np.zeros_like(mask); part_mask[6:10, 2:4] = True
@@ -38,7 +39,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         1., 0., surface_point=original[0], grasp_center=original[0])
     evidence = SimpleNamespace(events=[], annotations=[], registrations=[], retired=[],
         advice=[], targets=[], source_certificates=[], observations=[], executed=[],
-        track_calls=[], removals=[],
+        track_calls=[], removals=[], initializations=[],
         operation_order=[], original=original, source_points=source_points,
         current_points=current_points, predicted=predicted, neighbor=neighbor,
         candidate=candidate, original_ray=candidate.approach.copy())
@@ -52,7 +53,8 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             self.frame += 1; evidence.observations.append((self.frame, self.phase))
             template = current_sample if self.phase == 'close' else sample
             return replace(template, frame_id=self.frame, q=self.q.copy(),
-                gripper_q=self.gripper_q.copy(), timestamp=float(self.frame))
+                gripper_q=self.gripper_q.copy(),
+                timestamp=1. if initialize_reference and self.phase=='observe' else float(self.frame))
         def move_camera(self, *args): pass
         def validate_initial_proxies(self, *args): pass
         def step(self, q, grip):
@@ -139,12 +141,12 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             self.calls = 0; self.seconds = 0.; self.client = SimpleNamespace(close=lambda: None)
         def decide(self, obs, *args, **kwargs):
             self.calls += 1
-            if kwargs.get('force_observe'):
+            if kwargs.get('force_observe') or (initialize_reference and obs.frame_id==1):
                 return AgentDecision(action='observe', frame_id=obs.frame_id)
             decision = annotation(obs, mask)
             explicit_part = annotation(obs, part_mask).groundings[0].model_copy(update={'role': 'grasp_part'})
             return decision.model_copy(update={'action': 'grasp', 'target': 'mug',
-                'groundings': [*decision.groundings, explicit_part]})
+                'groundings': [*(decision.groundings if initial_identity else []), explicit_part]})
 
     class Resolver:
         calls = 0; seconds = 0.; segmenter = None; sam_unavailable_reason = 'test'
@@ -178,6 +180,18 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             raise PayloadRegistrationError('deliberate rejection', {'accepted': False, 'failure': 'no_current_evidence' if not len(measured) else 'test'})
         return SimpleNamespace(transformed_source_points=predicted.copy(), report={'accepted': True})
 
+    def initialize(vlm, source, side, reference, identity, support, **kwargs):
+        assert not evidence.executed and evidence.sim.phase=='observe'
+        assert (source.frame_id,side.frame_id)==(1,2)
+        assert source.timestamp==side.timestamp
+        assert np.array_equal(reference,original)
+        assert not evidence.retired and not evidence.source_certificates
+        evidence.initializations.append((source.frame_id,side.frame_id,reference.copy()))
+        vlm.calls+=1
+        ownership=resolve_object_ownership(source,annotation(source,mask),reference,
+            identity,support,kwargs['robot_depth']) if initialization_ok else None
+        return SimpleNamespace(ownership=ownership,report={'semantic_requests':1,'vlm_calls':1})
+
     def advice(*args, **kwargs):
         evidence.advice.append({'observed': kwargs['observed_points'].copy(),
             'coverage': np.asarray(args[2]).copy(), 'static_surface': evidence.map.surface.copy()})
@@ -206,6 +220,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     monkeypatch.setattr(runner, 'VLM', Decisions)
     monkeypatch.setattr(runner.GroundingResolver, 'from_config', lambda config: Resolver())
     monkeypatch.setattr(runner, 'annotate_source_object', annotate)
+    monkeypatch.setattr(runner, 'annotate_initial_object_reference', initialize)
     monkeypatch.setattr(runner, 'register_payload_source', register)
     monkeypatch.setattr(runner, 'Evaluator', lambda sim: SimpleNamespace(result=lambda: {
         'success': False, 'collision': False, 'first_grasp_success': False, 'collision_free_success': False}))
@@ -222,9 +237,14 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     monkeypatch.setattr(recording, 'save_grounding_result', lambda *args: None)
     monkeypatch.setattr(runner, 'save_episode', lambda out, sim, record, events: evidence.events.extend(events))
     result = runner.run_episode(task, 3, 'active', tmp_path, replay=tmp_path/'offline',
-        config=runner.ExperimentConfig(max_observations=max_observations, source_object_ownership=enabled))
+        config=runner.ExperimentConfig(max_observations=max_observations, source_object_ownership=enabled,
+            initial_multiview_reference=initialize_reference))
     expected_failure = ('execution: evaluator success criterion not met' if complete_lift
         else 'planning: lift deliberate lifecycle stop')
+    if initialize_reference and not initialization_ok:
+        expected_failure='perception: initial multiview object reference unverified'
+    if initialize_reference and not initial_identity:
+        expected_failure='perception: initial object reference requires one explicit target identity'
     assert result['failure'] == expected_failure
     assert not result['success'] and not result['online']
     assert np.array_equal(candidate.approach, evidence.original_ray)

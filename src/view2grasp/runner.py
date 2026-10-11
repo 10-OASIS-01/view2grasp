@@ -23,6 +23,7 @@ from .annotation_diagnostic import build_annotation_diagnostic
 from .placement import tabletop_placement
 from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
 from .object_annotation import annotate_source_object
+from .initial_object_reference import annotate_initial_object_reference
 from .payload_registration import register_payload_source,PayloadRegistrationError
 from .postclose_preview import LiftEvidence,setup_lift_attachment,preview_lift
 
@@ -785,6 +786,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             ownership_enabled=task=='mug' and config.source_object_ownership and record.attempts==0
             identities={g.target_id for g in decision.groundings if g.role=='object'}
             ownership_identity=next(iter(identities)) if len(identities)==1 else None
+            if ownership_enabled and config.initial_multiview_reference and ownership_identity is None:
+                raise RuntimeError('perception: initial object reference requires one explicit target identity')
             def annotate_owned(observation,reference,phase):
                 nonlocal ownership_perception_seconds
                 started=time.monotonic();inference_before=vlm.seconds
@@ -838,8 +841,43 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # The initial acquired overview complements the handle-side
                 # grasp image. No new camera frame or saved answer is supplied.
                 source_observation=map_.views[0]
-                source_ownership=annotate_owned(source_observation,original_object,'preclose')
+                if config.initial_multiview_reference:
+                    # Initialize before any robot motion, using the actual
+                    # side image that established the immutable grasp object.
+                    # Current mapping images cannot stand in for that source.
+                    side_observation=next((view for view in map_.views
+                        if view.frame_id==decision.frame_id and view.camera_id==decision.camera_id),None)
+                    if side_observation is None:
+                        raise RuntimeError('perception: initial object reference source image unavailable')
+                    started=time.monotonic();inference_before=vlm.seconds
+                    initialization=annotate_initial_object_reference(vlm,source_observation,
+                        side_observation,original_object,ownership_identity,map_.table_z,
+                        robot_depth=robot_depths.get(source_observation.frame_id),
+                        target_description=decision.target)
+                    ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
+                    stem=out/f'initial_object_reference_{source_observation.frame_id:03d}'
+                    stem.with_suffix('.json').write_text(json.dumps(initialization.report,indent=2))
+                    source_ownership=initialization.ownership
+                    event('initial_multiview_object_reference',frame_id=source_observation.frame_id,
+                        side_frame_id=side_observation.frame_id,accepted=source_ownership is not None,
+                        semantic_requests=initialization.report['semantic_requests'],
+                        vlm_calls=initialization.report['vlm_calls'],
+                        object_points=0 if source_ownership is None else len(source_ownership.object_points),
+                        phase='before_execution',contact_reference_changed=False)
+                    if source_ownership is None:
+                        raise RuntimeError('perception: initial multiview object reference unverified')
+                    np.savez_compressed(stem.with_suffix('.npz'),
+                        object_points=source_ownership.object_points,
+                        object_mask=source_ownership.object_mask,
+                        source_pixels_xy=source_ownership.source_pixels_xy,
+                        abstained_source_pixels_xy=source_ownership.abstained_source_pixels_xy,
+                        side_object=original_object)
+                else:
+                    source_ownership=annotate_owned(source_observation,original_object,'preclose')
             ownership_reference=np.vstack([original_object,source_ownership.object_points]) if source_ownership is not None else original_object.copy()
+            if ownership_enabled and config.initial_multiview_reference:
+                ownership_reference.flags.writeable=False
+                np.save(out/'initial_ownership_reference.npy',ownership_reference)
             record.attempts+=1
             record.failure="";sim.episode_attempt=record.attempts
             execute(transit,-1,"pregrasp"); execute(approach,-1,"approach")

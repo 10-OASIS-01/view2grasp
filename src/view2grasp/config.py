@@ -23,6 +23,9 @@ class ExperimentConfig(BaseModel):
     # Mug development: independently annotate acquired object surfaces and
     # register historical ownership before using it as a carried envelope.
     source_object_ownership: bool = False
+    # Opt-in mug initialization: establish explicit object material from the
+    # acquired overview and side view before freezing reassociation references.
+    initial_multiview_reference: bool = False
     # Mug development: share the existing search budget across candidate poses
     # before repeating redundant-IK seeds for any one pose.
     diversify_grasp_attempts: bool = False
@@ -44,6 +47,12 @@ class ExperimentConfig(BaseModel):
     def validate_post_lift_reserve(self):
         if self.max_observations - self.post_lift_observations < 2:
             raise ValueError('post-lift reserve requires an initial and a post-close observation')
+        return self
+
+    @model_validator(mode='after')
+    def validate_initial_reference(self):
+        if self.initial_multiview_reference and not self.source_object_ownership:
+            raise ValueError('initial multiview reference requires source object ownership')
         return self
 
 
