@@ -1,5 +1,6 @@
 """Observation-only grounding conversion. Masks never certify free space."""
 from dataclasses import dataclass
+import json
 import time
 import numpy as np
 import cv2
@@ -62,24 +63,57 @@ def proposal_mask(proposal, obs, candidates=None):
     return mask.astype(bool)
 
 
+class GroundingSeedError(ValueError):
+    """Strict seed rejection with observation-only, serializable feedback."""
+    def __init__(self,diagnostics):
+        self.diagnostics=diagnostics
+        correction=('Correct the explicit seed, or omit optional contact points while still supplying valid object/part regions.'
+            if diagnostics['valid_candidate_pixels'] else
+            'Correct the proposed region or acquire another observation; no filtered pixels remain.')
+        super().__init__('grounding seed rejected: '+json.dumps(diagnostics,separators=(',',':'))+
+            ' '+correction+' Candidate pixels are filtered depth only, not semantic correctness or graspability evidence.')
+
+
 def depth_component(obs, allowed, seeds=(), negative_points=(), support_z=None, robot_depth=None):
     """4-connected RGB-D surface; invalid depth and depth jumps split components."""
     from .geometry import unproject
     h,w = obs.depth.shape
-    valid = np.asarray(allowed, dtype=bool).copy()
-    valid &= np.isfinite(obs.depth) & (obs.depth > .05) & (obs.depth < 10)
+    proposed = np.asarray(allowed, dtype=bool)
+    valid = proposed.copy()
+    depth_valid = np.isfinite(obs.depth) & (obs.depth > .05) & (obs.depth < 10)
+    valid &= depth_valid
+    robot_clear = np.ones((h,w),dtype=bool)
     if robot_depth is not None:
-        valid &= np.abs(obs.depth - robot_depth) > .003
+        robot_clear = np.abs(obs.depth - robot_depth) > .003
+        valid &= robot_clear
     v,u = np.mgrid[:h,:w]
     xyz = unproject(np.stack([u,v],-1), obs.depth, obs.K, obs.T_wc)
+    support_clear = np.ones((h,w),dtype=bool)
     if support_z is not None:
-        valid &= xyz[:,:,2] > support_z + .006
+        support_clear = xyz[:,:,2] > support_z + .006
+        valid &= support_clear
+    negative_excluded = np.zeros((h,w),dtype=bool)
     for x,y in pixels(negative_points, (h,w)).reshape(-1,2):
-        valid[max(0,y-2):y+3,max(0,x-2):x+3] = False
+        negative_excluded[max(0,y-2):y+3,max(0,x-2):x+3] = True
+    valid &= ~negative_excluded
     if seeds:
         seed_pixels = pixels(seeds, (h,w))
         if not all(valid[y,x] for x,y in seed_pixels):
-            raise ValueError("grounding seed on hole/background/robot/invalid depth")
+            failures=[]
+            for index,(x,y) in enumerate(seed_pixels):
+                if valid[y,x]:continue
+                reasons=[]
+                if not proposed[y,x]:reasons.append('outside_proposed_region')
+                if not depth_valid[y,x]:reasons.append('invalid_depth')
+                if depth_valid[y,x] and not robot_clear[y,x]:
+                    reasons.append('robot_self_return' if np.isfinite(robot_depth[y,x]) else 'invalid_depth')
+                if depth_valid[y,x] and not support_clear[y,x]:reasons.append('support_plane')
+                if negative_excluded[y,x]:reasons.append('negative_point')
+                failures.append({'seed_index':index,'normalized':list(map(float,seeds[index])),
+                    'pixel':[int(x),int(y)],'reasons':reasons})
+            raise GroundingSeedError({'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+                'valid_candidate_pixels':int(valid.sum()),'rejected_seed_count':len(failures),
+                'rejected_seeds':failures[:16],'rejected_seeds_truncated':len(failures)>16})
     else:
         # Prefer the interior of the proposed region, not its bounding-box center.
         distance = cv2.distanceTransform(valid.astype(np.uint8), cv2.DIST_L2, 3)

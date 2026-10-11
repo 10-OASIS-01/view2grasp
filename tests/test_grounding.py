@@ -39,7 +39,7 @@ def test_mask_seed_on_hole_is_rejected():
     p=proposal(holes=[[ (.4,.4),(.6,.4),(.6,.6),(.4,.6) ]])
     seed=GroundingProposal(kind='points',role='grasp_contact',points=[(.5,.5)],frame_id=1)
     d=AgentDecision(action='grasp',frame_id=1,groundings=[p,seed])
-    with pytest.raises(ValueError,match='hole'):
+    with pytest.raises(ValueError,match='outside_proposed_region'):
         GroundingResolver().resolve_grasp(obs,d,.5)
 
 
