@@ -30,6 +30,21 @@ uv run pytest -q
 uv run view2grasp run --task block --seed 3 --root runs/development
 ```
 
+For the **GLM vision API**, copy `.env.glm.example` to an untracked `.env`, edit the key locally, and explicitly load it:
+
+```sh
+cp -n .env.glm.example .env
+chmod 600 .env
+# Edit .env locally to set ZHIPU_API_KEY before running this command.
+uv run --env-file .env view2grasp check-vlm --output artifacts/glm-check-01
+```
+
+Use a fresh terminal without previous VLM exports, or clear them as described in the [GLM setup guide](docs/glm.md). The project does not automatically load `.env`. The GLM preset selects `glm-5.3-flashx` at the official BigModel endpoint with thinking enabled, low reasoning effort, and a 4096-token output budget; these settings and the timeout are configurable. Account access and pricing depend on the service. The original OpenAI-compatible configuration above remains supported.
+
+`check-vlm` sends a synthetic image and checks both structured JSON and red-square localization without starting a simulator. Its `success` concerns only this API check, not a robot task; inspect `probe_report.json` and `vlm/call_*.json` for the result and the actual response model. A successful `doctor` rendering and `/models` check does not verify image requests. See [GLM setup, one-episode commands, and troubleshooting](docs/glm.md).
+
+On 2026-10-11, the GLM preset passed this synthetic-image check in one call (2.144 seconds), with `glm-5.3-flashx` returned as the actual model. This is API and basic visual-grounding evidence, not a successful robot grasp.
+
 Optional verified SAM backend (otherwise `auto` logs RGB-D fallback):
 
 ```sh

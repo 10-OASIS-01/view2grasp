@@ -2,6 +2,9 @@
 __pycache__/
 .pytest_cache/
 .env
+.env.*
+!.env.example
+!.env.glm.example
 runs/
 *.egg-info/
 .DS_Store

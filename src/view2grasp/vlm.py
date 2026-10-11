@@ -2,14 +2,15 @@
 import base64
 import io
 import json
-import os
 import time
 import copy
 import hashlib
+import math
 from pathlib import Path
 import httpx
 from PIL import Image
 from .types import AgentDecision, Observation
+from .vlm_settings import VLMSettings
 
 LEGACY_SYSTEM = '''You control a Franka Panda in a tabletop simulator using only images.
 Return one JSON object (no markdown). Actions: observe, grasp, abort.
@@ -80,6 +81,9 @@ groundings is a list of associated visual proposals. Each proposal includes:
 kind (points, box, polygon, path), role, frame_id, camera_id, target_id, source="vlm".
 roles: object, grasp_part, grasp_contact, place_region, navigation_goal,
 ground_path, end_effector_path, look_at. Coordinates are normalized [0,1].
+The image origin is top-left; x increases rightward and y downward.
+kind is the representation, NOT the semantic role: an object box has
+kind="box", role="object", and a box field. Never use kind="object".
 points uses points:[[x,y],...]; box uses box:[left,top,right,bottom]; polygon
 uses points as its outer boundary and optional holes:[[[x,y],...],...]; path
 uses points in traversal order. Optional negative_points identify exclusions.
@@ -113,15 +117,17 @@ the grasp proposals. Do not invent geometry or refer to unseen candidate images.
 
 class VLM:
     def __init__(self, directory: Path, replay=None):
+        self.settings = VLMSettings.from_env(require_api_key=replay is None)
         self.directory = directory
         self.directory.mkdir(parents=True,exist_ok=True)
         self.calls = 0; self.seconds = 0.; self.replay = replay
-        self.client = httpx.Client(timeout=120)
+        self.client = httpx.Client(timeout=self.settings.timeout_seconds)
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False):
         image = io.BytesIO(); Image.fromarray(obs.rgb).save(image,format="PNG")
         image_sha256=hashlib.sha256(obs.rgb.tobytes()).hexdigest()
         user = {"instruction":instruction,"frame_id":obs.frame_id,"camera_id":obs.camera_id,"view":obs.view,
+                "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
         user['allowed_actions']=['observe','grasp','abort'] if obs.base_pose is None else ['observe','navigate','grasp','place','finish','abort']
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
@@ -129,13 +135,17 @@ class VLM:
             {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]
         last_error = None
         for repair in range(3):
-            payload = {"model":os.getenv("VLM_MODEL","gt-6-as-a"),"messages":messages}
+            payload = {"model":self.settings.model,"messages":messages,**self.settings.request_options()}
             index = self.calls; self.calls += 1
             start = time.monotonic()
             response = None
+            connection = self.settings.public_metadata()
+            logged_model = payload['model']
             try:
                 if self.replay:
                     saved=json.loads((Path(self.replay)/f"call_{index:03d}.json").read_text())
+                    connection = saved['request'].get('connection')
+                    logged_model = saved['request'].get('model', 'unknown')
                     expected=saved["request"].get("image_sha256")
                     if expected and expected!=image_sha256:
                         raise RuntimeError("response replay image mismatch; use the original recorded episode for state replay")
@@ -147,11 +157,27 @@ class VLM:
                                 raise RuntimeError("legacy response replay image mismatch")
                     response = saved["response"]
                 else:
-                    r = self.client.post(os.getenv("VLM_BASE_URL","http://127.0.0.1:8318/v1").rstrip("/")+"/chat/completions",
-                        headers={"Authorization":"Bearer "+os.getenv("VLM_API_KEY","local")},json=payload)
+                    r = self.client.post(self.settings.base_url+"/chat/completions",
+                        headers={"Authorization":"Bearer "+self.settings.api_key},json=payload)
+                    if r.is_error:
+                        try: response = r.json()
+                        except ValueError: response = None
                     r.raise_for_status(); response = r.json()
-                text = response["choices"][0]["message"]["content"].strip()
-                if text.startswith("```"): text = text.split("\n",1)[1].rsplit("```",1)[0]
+                if not isinstance(response,dict) or not isinstance(response.get('choices'),list) or not response['choices']:
+                    raise ValueError('VLM response has no choices')
+                choice = response['choices'][0]
+                if not isinstance(choice,dict) or not isinstance(choice.get('message'),dict):
+                    raise ValueError('VLM response has no assistant message')
+                if choice.get('finish_reason') not in (None,'stop'):
+                    raise ValueError('VLM response did not complete: '+str(choice['finish_reason']))
+                content = choice['message'].get('content')
+                if not isinstance(content,str) or not content.strip():
+                    raise ValueError('VLM response has no final text content')
+                text = content.strip()
+                if text.startswith("```"):
+                    if '\n' not in text or not text.endswith('```'):
+                        raise ValueError('VLM response has an incomplete JSON code fence')
+                    text = text.split("\n",1)[1].rsplit("```",1)[0]
                 decision = AgentDecision.model_validate_json(text)
                 if decision.frame_id != obs.frame_id: raise ValueError("frame_id is stale")
                 if decision.camera_id != obs.camera_id: raise ValueError("camera_id is stale or incorrect")
@@ -162,8 +188,32 @@ class VLM:
                 last_error=None
                 return decision
             except (ValueError, KeyError, httpx.HTTPError) as exc:
-                last_error = str(exc)
-                messages.append({"role":"user","content":"Correct your JSON response: "+last_error})
+                last_error = self.settings.redact(str(exc))
+                if isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code in (401,403):
+                    raise RuntimeError('VLM authentication failed; check the API key and model access') from None
+                if isinstance(exc,httpx.HTTPStatusError) and exc.response.status_code in (400,404):
+                    detail = response.get('error') if isinstance(response,dict) else None
+                    detail = detail.get('message') if isinstance(detail,dict) else None
+                    detail = self.settings.redact(detail)[:500] if isinstance(detail,str) else 'check model, endpoint and request options'
+                    raise RuntimeError(f'VLM request rejected (HTTP {exc.response.status_code}): {detail}') from None
+                if isinstance(exc,httpx.HTTPError):
+                    # A service error is not a model formatting mistake. Keep
+                    # the current conversation and respect bounded retry waits.
+                    if repair < 2 and not self.replay:
+                        delay = 2. ** repair
+                        if isinstance(exc,httpx.HTTPStatusError):
+                            try: delay = float(exc.response.headers.get('Retry-After', delay))
+                            except ValueError: pass
+                        if not math.isfinite(delay): delay = 2. ** repair
+                        time.sleep(max(0.,min(delay,30.)))
+                else:
+                    # Include the rejected answer so the model can repair its
+                    # actual fields, instead of guessing from an error alone.
+                    choices = response.get('choices') if isinstance(response,dict) else None
+                    previous = choices[0].get('message') if isinstance(choices,list) and choices and isinstance(choices[0],dict) else None
+                    if isinstance(previous,dict) and isinstance(previous.get('content'),str):
+                        messages.append({'role':'assistant','content':self.settings.redact(previous['content'])})
+                    messages.append({"role":"user","content":"Correct your JSON response: "+last_error})
             finally:
                 elapsed = time.monotonic()-start; self.seconds += elapsed
                 # Credentials are never recorded. Image is stored separately in observations.
@@ -173,8 +223,11 @@ class VLM:
                         for item in message["content"]:
                             if item.get("type")=="image_url":
                                 item["image_url"]["url"]=f"../observations/frame_{obs.frame_id:03d}.png"
-                request_log = {"model":payload["model"],"context":user,"messages":logged,"repair":repair,
+                request_log = {"model":logged_model,"connection":connection,
+                    "transport":"replay" if self.replay else "online",
+                    "context":user,"messages":logged,"repair":repair,
                     "image_sha256":image_sha256}
-                (self.directory/f"call_{index:03d}.json").write_text(json.dumps({"request":request_log,
-                    "response":response,"seconds":elapsed,"error":last_error},ensure_ascii=False,indent=2))
+                log_text=json.dumps({"request":request_log,
+                    "response":response,"seconds":elapsed,"error":last_error},ensure_ascii=False,indent=2)
+                (self.directory/f"call_{index:03d}.json").write_text(self.settings.redact(log_text))
         raise RuntimeError("VLM failure: "+str(last_error))
