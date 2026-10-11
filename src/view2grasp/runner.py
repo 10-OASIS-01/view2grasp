@@ -41,13 +41,16 @@ _MUG_REFINEMENT_INSTRUCTION=(
 
 _MUG_POSTCLOSE_CONTACT_INSTRUCTION=(
     'Inspect only the supplied current image after the gripper has closed. '
-    'Verify the SAME mug and its originally requested outer vertical handle bar. '
+    'This transaction only verifies a clearly visible patch of the originally permitted '
+    'far outer vertical handle segment, away from the cup body. '
+    'Exclude both horizontal handle connectors and both junctions. '
     'Return observe with tight object and grasp_part polygons using the existing target_id. '
-    'The object polygon may cover only clearly visible material of that same handle; '
-    'it need not include the complete cup body or hidden surfaces. The grasp_part must '
-    'remain the originally permitted outer bar, not the cup body or another handle segment. '
+    'The object and grasp_part polygons may be IDENTICAL, enclosing the SAME clearly visible '
+    'patch of that permitted outer bar. Neither polygon needs to cover the full handle or cup. '
+    'Do not include cup-body material, other handle segments, hidden surfaces or uncertain pixels. '
     'Use this image directly; do not infer coordinates from an earlier overhead view, '
-    'select a new grasp, move a contact seed, or request camera motion. Omit regions if uncertain.')
+    'select a new grasp, move a contact seed, or request camera motion. '
+    'Omit regions if the permitted outer bar is occluded or uncertain.')
 
 
 def _contact_annotation_progressed(previous, current):

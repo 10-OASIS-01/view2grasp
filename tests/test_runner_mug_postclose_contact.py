@@ -196,7 +196,12 @@ def test_verified_part_and_measured_object_have_separate_postclose_lifecycles(tm
         assert request['phase']=='close' and request['steps']==e.physical_steps
         assert len(request['history'])==1
         assert request['options']['force_observe'] is True
-        assert 'clearly visible material of that same handle' in request['instruction']
+        assert 'far outer vertical handle segment, away from the cup body' in request['instruction']
+        assert 'Exclude both horizontal handle connectors and both junctions' in request['instruction']
+        assert 'polygons may be IDENTICAL' in request['instruction']
+        assert 'SAME clearly visible patch of that permitted outer bar' in request['instruction']
+        assert 'Neither polygon needs to cover the full handle or cup' in request['instruction']
+        assert 'Omit regions if the permitted outer bar is occluded or uncertain' in request['instruction']
         assert 'earlier overhead view' in request['instruction']
     assert contains(e.targets[-1][1],e.allowed_part)
     assert contains(e.allowed_part,e.targets[-1][1])
