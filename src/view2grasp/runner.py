@@ -1000,6 +1000,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             planner.observed_payload_local=None
             planner.registered_payload_local=None
             attached_part=(target_part-p)@R
+            planner.attached_contact_local=attached_part.copy() if semantic_contact_only else None
+            if semantic_contact_only:np.save(out/'payload_contact_points.npy',target_part)
             np.save(out/'payload_source_points.npy',target)
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
             actual_payload_source=target

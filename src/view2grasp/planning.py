@@ -314,6 +314,10 @@ class Planner:
     def __init__(self,robot,map_,rng):
         self.robot=robot; self.map=map_; self.rng=rng; self.last_failure=""; self.checks=0
         self.attached=None; self.gripper=None; self.last_bad=0;self.deadline=None
+        # Optional independently grounded grasp part, in the same TCP frame.
+        # None preserves legacy attachment contact; an empty array permits none.
+        # Whole-object observations and registered predictions never expand it.
+        self.attached_contact_local=None
         # Additional strictly associated observed surfaces affect collision
         # checks only. They never change semantic references or finger contact.
         self.observed_payload_local=None
@@ -379,8 +383,11 @@ class Planner:
             state[pads & allowed]=FREE
         if self.attached is not None:
             p,R=self.robot.pose()
-            held=self.attached@R.T+p
-            touching=cKDTree(held).query(pts,distance_upper_bound=.012)[0]<.012
+            contact_local=(self.attached if self.attached_contact_local is None
+                else self.attached_contact_local)
+            held_contact=contact_local@R.T+p
+            touching=(cKDTree(held_contact).query(pts,distance_upper_bound=.012)[0]<.012
+                if len(held_contact) else np.zeros(len(pts),dtype=bool))
             # Removing the held object's old endpoints leaves static obstacles
             # intact. Never waive a remaining observed obstacle near the payload.
             state[pads & touching & (state!=OCCUPIED)]=FREE

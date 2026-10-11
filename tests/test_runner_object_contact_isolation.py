@@ -142,6 +142,7 @@ def run_contact_lifecycle(tmp_path, monkeypatch, *, object_seeds, explicit_part,
     # All source points are still carried through the collision-only target.
     payload = e.planner.attached
     assert np.all(cKDTree(payload).query(current)[0] < .005)
+    e.output = tmp_path/'mug_active_0003'
     return e
 
 
@@ -153,6 +154,12 @@ def test_explicit_whole_object_seeds_never_expand_contact_at_any_runner_phase(
     assert all(np.array_equal(points, e.original_part) for _, points in e.targets)
     assert {phase for phase, _ in e.targets} >= {'observe', 'close'}
     assert not e.map.contact_allowed(e.body).any()
+    saved = np.load(e.output/'payload_contact_points.npy')
+    attachment = np.load(e.output/'payload_attachment_pose.npz')
+    assert np.array_equal(saved, e.original_part)
+    assert np.allclose(e.planner.attached_contact_local,
+        (saved-attachment['position']) @ attachment['rotation'])
+    assert not np.any(cKDTree(e.planner.attached_contact_local).query(e.body)[0] < .012)
     # A successful post-lift tracker result is not a semantic contact update.
     assert not any(phase == 'hold' for phase, _ in e.targets)
 
@@ -165,11 +172,15 @@ def test_ownership_mode_preserves_measured_part_even_without_initial_object_seed
     assert e.annotations
     assert all(np.array_equal(points, e.original_part) for _, points in e.targets)
     assert not e.map.contact_allowed(e.body).any()
+    assert np.array_equal(np.load(e.output/'payload_contact_points.npy'), e.original_part)
+    assert np.array_equal(e.planner.attached_contact_local, e.original_part)
 
 
 def test_legacy_unseeded_nonownership_path_keeps_existing_contact_behavior(tmp_path, monkeypatch):
     e = run_contact_lifecycle(tmp_path, monkeypatch,
         object_seeds=False, explicit_part=False, ownership=False)
     assert not e.annotations
+    assert e.planner.attached_contact_local is None
+    assert not (e.output/'payload_contact_points.npy').exists()
     assert any(np.any(cKDTree(points).query(e.body)[0] < .005) for _, points in e.targets)
     assert any(phase == 'hold' for phase, _ in e.targets)
