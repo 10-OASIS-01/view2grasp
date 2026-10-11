@@ -82,14 +82,42 @@ def test_pad_near_independent_occupied_endpoint_still_blocks_when_contact_not_al
 
 def test_precheck_consumes_original_deadline_and_partial_candidate_is_not_clear(monkeypatch):
     import view2grasp.planning as module
-    p,r=planner(lambda pts:np.full(len(pts),FREE));ticks=iter(np.arange(0.,100.,.1))
-    monkeypatch.setattr(module.time,'monotonic',lambda:float(next(ticks)))
-    assert p.choose(np.zeros(7),[grasp(),grasp(1.18)],max_candidates=1,time_budget=.7,prioritize_gripper_geometry=True) is None
+    clock=[0.];p,r=planner(lambda pts:np.full(len(pts),FREE))
+    def classify(points):
+        clock[0]+=.01;return np.full(len(points),FREE,dtype=np.uint8)
+    p.map.classify=classify
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
+    ik_times=[];original_ik=r.ik
+    def ik(*args):ik_times.append(clock[0]);return original_ik(*args)
+    r.ik=ik;p.approach=lambda q,g:np.array([q,q]);p.plan=lambda a,b:np.array([a,b])
+    a,b=grasp(),grasp(1.18)
+    result=p.choose(np.zeros(7),[a,b],max_candidates=1,time_budget=1.,prioritize_gripper_geometry=True)
     d=p.geometry_ranking
-    assert d['status']=='time_budget' and d['incomplete_candidates']==2
-    assert d['nominal_clear_candidates']==0 and d['checked_candidates']==0
-    assert not r.calls and p.checks==0
+    assert d['status']=='time_budget' and d['stop_reason']=='precheck_time_budget'
+    assert d['incomplete_candidates']==1 and d['nominal_clear_candidates']==1 and d['checked_candidates']==1
+    assert d['precheck_budget_seconds']==.25 and .25<=d['precheck_seconds']<.26
+    assert ik_times and ik_times[0]<.26 and result[0] is a and p.checks==1
+    # Neither the partial candidate nor its partially visited ray is certified.
+    assert d['selected_priority_candidates']==1
+
+
+def test_geometry_budget_never_extends_global_deadline(monkeypatch):
+    import view2grasp.planning as module
+    p,r=planner(lambda pts:np.full(len(pts),FREE));clock=[0.]
+    monkeypatch.setattr(module.time,'monotonic',lambda:clock[0])
+    def classify(points):
+        clock[0]=1.1;return np.full(len(points),FREE,dtype=np.uint8)
+    p.map.classify=classify
+    assert p.choose(np.zeros(7),[grasp()],time_budget=1.,prioritize_gripper_geometry=True) is None
+    assert p.geometry_ranking['stop_reason']=='planning_time_budget'
+    assert p.geometry_ranking['incomplete_candidates']==1 and not r.calls
     assert p.last_failure=='planning budget exhausted: candidate geometry ranking'
+
+
+def test_geometry_budget_is_capped_at_eight_seconds():
+    p,r=planner(lambda pts:np.full(len(pts),FREE));r.ik=lambda *args:None
+    p.choose(np.zeros(7),[grasp()],time_budget=120.,prioritize_gripper_geometry=True)
+    assert p.geometry_ranking['precheck_budget_seconds']==8.
 
 
 def test_priority_fills_from_original_diverse_fallback_without_mutating_candidates():

@@ -319,6 +319,7 @@ class Planner:
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
         self.payload_invalid=None
         self.geometry_ranking={}
+        self._geometry_time_budget=8.
 
     def begin_payload_lift(self):
         """Record the observation-derived attachment pose for vertical lift."""
@@ -518,6 +519,7 @@ class Planner:
         self.best_unknown=None;self.closest_invalid=None;self.closest_by_failure={};self.failure_counts=Counter()
         self.unknown_samples=[];self.unknown_sample_count=0
         self.geometry_ranking={}
+        self._geometry_time_budget=min(8.,max(0.,float(time_budget))*.25)
         self.deadline=time.monotonic()+time_budget
         try:return self._choose(q,candidates,max_candidates,prioritize_gripper_geometry)
         except PlanningBudgetExceeded:
@@ -535,16 +537,24 @@ class Planner:
         unverified; all normal robot, map and path checks still run afterward.
         """
         started=time.monotonic();preferred=[]
+        precheck_deadline=started+self._geometry_time_budget
+        if self.deadline is not None:precheck_deadline=min(precheck_deadline,self.deadline)
         info={'input_candidates':len(candidates),'checked_candidates':0,
             'nominal_clear_candidates':0,'nominal_blocked_candidates':0,
             'incomplete_candidates':len(candidates),'status':'unavailable',
             'scope':'ordering only; no observed gripper obstacle is not a free-space certificate',
-            'precheck_seconds':0.}
+            'precheck_seconds':0.,'precheck_budget_seconds':self._geometry_time_budget}
         self.geometry_ranking=info
         if not hasattr(self.robot,'gripper_local_points'):return preferred
         try:
-            if self.deadline is not None and time.monotonic()>=self.deadline:
-                info['status']='time_budget';return preferred
+            def expired():
+                now=time.monotonic()
+                if now<precheck_deadline:return False
+                info['status']='time_budget'
+                info['stop_reason']=('planning_time_budget' if self.deadline is not None and now>=self.deadline
+                    else 'precheck_time_budget')
+                return True
+            if expired():return preferred
             local,pads=self.robot.gripper_local_points(q,self.gripper)
             info['gripper_samples']=len(local)
             if not len(local):return preferred
@@ -552,8 +562,7 @@ class Planner:
             for g in candidates:
                 blocked=False
                 for offset in np.linspace(.08,0,17):
-                    if self.deadline is not None and time.monotonic()>=self.deadline:
-                        info['status']='time_budget';return preferred
+                    if expired():return preferred
                     points=local@g.rotation.T+g.position-g.approach*offset
                     state=self.map.classify(points).copy()
                     if offset<.012:
