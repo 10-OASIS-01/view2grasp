@@ -32,7 +32,7 @@ def test_incomplete_or_kinematically_valid_priority_set_cannot_trigger(updates):
 def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=None,
             max_observations=9,ground_frame=3):
     from view2grasp import runner,recording
-    e=SimpleNamespace(frames=[],groundings=[],candidates=[],calls=[],events=[],moves=[],advice=[])
+    e=SimpleNamespace(frames=[],groundings=[],candidates=[],calls=[],events=[],moves=[],advice=[],reachability=[])
     target=np.array([[.04+i*.001,-.12,.90] for i in range(20)])
 
     class Sim:
@@ -76,7 +76,10 @@ def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=
             e.candidates.append(candidates);self.checks+=1
             # The same limitation remains after later mapping, exercising the
             # episode-wide one-shot cap without certifying any candidate.
-            self.geometry_ranking=copy.deepcopy(diagnostic if diagnostic is not None else ranking())
+            # Only the post-mapping retry has the complete geometric evidence;
+            # a fresh candidate transaction starts without that evidence.
+            self.geometry_ranking=(copy.deepcopy(diagnostic if diagnostic is not None else ranking())
+                if len(e.candidates)>1 and candidates is e.candidates[-2] else {'status':'disabled'})
             return None
         def recovery_unknown(self):return target[:1]
 
@@ -130,6 +133,14 @@ def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=
         e.advice.append(budget)
         return {'views':[[30.,20.,.9]]*min(2,budget)}
 
+    def reachable(robot,obs,contact,part,observed,**kwargs):
+        assert np.allclose(contact,e.candidates[-1][0].surface_point)
+        assert len(part) and observed is target
+        assert kwargs['budget']==3 and kwargs['max_ik_calls']==72 and 0<=kwargs['time_budget']<=4.
+        e.reachability.append(obs.frame_id)
+        return {'views':[[120.,30.,.9]],'requires_new_grounding':True,
+            'scope':'Kinematics only; no visibility or collision permission.'}
+
     for name,value in [('Simulator',Sim),('RobotModel',Robot),('DepthMap',Map),('Planner',Plan),('VLM',Decisions)]:
         monkeypatch.setattr(runner,name,value)
     monkeypatch.setattr(runner.GroundingResolver,'from_config',lambda config:Resolver())
@@ -140,6 +151,7 @@ def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=
     monkeypatch.setattr(runner,'part_cloud',lambda *args:target.copy())
     monkeypatch.setattr(runner,'fit_table',lambda *args:.8)
     monkeypatch.setattr(runner,'suggest_views',advice)
+    monkeypatch.setattr(runner,'suggest_reachable_views',reachable)
     monkeypatch.setattr(runner,'check_vertical_part_midpoint',lambda obs,*args:{'frame_id':obs.frame_id,'status':'unresolved'})
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
@@ -164,6 +176,8 @@ def test_mapping_image_can_start_one_explicit_fresh_grasp_without_extra_observat
     assert advice['retired_grounding_frame_id']==3 and advice['frame_id']==5
     assert advice['remaining_pregrasp_observations']==1 and advice['reserved_post_close_observations']==3
     assert advice['acquires_new_observation'] is False
+    assert e.reachability==[5] and advice['kinematic_view_advice']['views']==[[120.,30.,.9]]
+    assert advice['total_reselections']==1 and advice['current_frame_reselection_count']==1
     assert e.events[-1]['kind']=='observation_budget_reserved' and e.events[-1]['reserved_after_close']==3
 
 
@@ -219,3 +233,10 @@ def test_current_frame_reselection_is_once_even_with_more_remaining_mapping_allo
     assert sum('current_frame_reselection' in c['kwargs'] for c in e.calls)==1
     assert [frame for frame,_ in e.groundings]==[1,3]
     assert result['observations']==6 and result['attempts']==0
+
+
+def test_ten_observation_development_allowance_keeps_three_post_close_slots(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,max_observations=10)
+    assert result['observations']==7 and e.frames==list(range(1,8))
+    assert e.events[-1]['kind']=='observation_budget_reserved' and e.events[-1]['reserved_after_close']==3
+    assert sum('current_frame_reselection' in c['kwargs'] for c in e.calls)==1

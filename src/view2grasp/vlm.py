@@ -141,10 +141,15 @@ mapping_context exposes the latest advice and which advised views have not
 been acquired in that recovery transaction. Prefer its remaining views over
 remembering the list from older history. These are predicted viewpoints, not
 observed free space; every motion still needs geometric validation.
-approach_reselection_context instead marks a failed kinematic grasp direction.
-Choose a genuinely different semantic observation of the requested graspable part;
+approach_reselection_context instead reports a bounded geometry or kinematics
+search limitation for the previous grasp direction, not global infeasibility.
+Choose a different semantic observation of the requested graspable part;
 after it is acquired, ground again to select a NEW approach ray. It is not a
 mapping-only transaction and old grasp coordinates do not apply to the new image.
+Both approach_reselection_context and current_frame_reselection_context permit
+revisiting an earlier view: the mapping-only preference for unvisited coverage
+does not apply. Use supplied robot-only kinematic view advice to prioritize
+directions; it does not prove target visibility, free space, or a safe path.
 annotation_context requests regions in the supplied current image only. It does
 not acquire another observation or execute a camera command. If this image is a
 calibrated crop, ALL coordinates refer to that crop's image_size; never reuse old
@@ -272,17 +277,33 @@ class VLM:
                     'AND grasp_part regions in this image; the planner will derive a NEW camera-to-contact ray. '
                     'Old preserve-ray/mapping-only instructions and the initial-grounding deadline do not apply '
                     'to this new transaction. Do not reuse old coordinates, candidate IDs, or target masks. '
-                    'If this image is unsuitable, choose observe or abort. Observation reserves and all safety checks remain in force.'}
+                    'If this image is unsuitable, choose observe or abort. Revisiting an earlier view is allowed; '
+                    'do not reject a view just because it was already acquired for mapping. Prefer supplied '
+                    'robot-only kinematic view advice when selecting an observation, while checking the requested '
+                    'part in the next actual image: advice does not prove visibility, free space or path safety. '
+                    'Observation reserves and all safety checks remain in force.'}
         if force_observe and obs.base_pose is None:
             if observe_purpose=='mapping_only':
                 user['mapping_context']=_mapping_context(obs,history)
             elif observe_purpose=='approach_reselection':
+                evidence=next((item['approach_reselection'] for item in reversed(history)
+                    if isinstance(item,dict) and isinstance(item.get('approach_reselection'),dict)),None)
+                if evidence is not None and (evidence.get('frame_id')!=obs.frame_id
+                        or evidence.get('camera_id')!=obs.camera_id):
+                    evidence=None
                 user['approach_reselection_context']={
                     'purpose':'approach_reselection','current_view':list(obs.view),
-                    'instructions':'Kinematic search found no valid pregrasp pose for the current camera-to-contact direction. '
+                    'reason':None if evidence is None else evidence.get('reason'),
+                    'evidence':copy.deepcopy(evidence),
+                    'instructions':'The previous grasp transaction is ending after bounded geometry or kinematics search. '
+                        'Use the current evidence.reason to distinguish nominal observed obstacles from exhausted IK seeds; '
+                        'neither establishes global infeasibility or absence of every valid pregrasp pose. '
                         'Select a different semantic view that exposes the same requested graspable part from a reachable direction. '
                         'This ends the failed grasp transaction: the next acquired image requires fresh grounding and a NEW ray. '
                         'Do not reuse old image coordinates or treat this as mapping-only recovery. '
+                        'Revisiting an earlier view is allowed; the mapping-only preference for unvisited views does not apply. '
+                        'Prioritize supplied robot-only kinematic view advice, which does not certify target visibility, '
+                        'free space or path safety. '
                         'This request overrides an earlier initial-grounding deadline; remaining observation and post-close reserves still apply.'}
             else:
                 user['annotation_context']={

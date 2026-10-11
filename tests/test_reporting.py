@@ -13,7 +13,8 @@ def test_config_is_explicit_and_bounded():
     assert len(config.test_seeds)==20 and min(config.test_seeds)>=100
     assert fingerprint(config)==fingerprint(config)
     assert ExperimentConfig(max_observations=9).max_observations==9
-    with pytest.raises(ValidationError):ExperimentConfig(max_observations=10)
+    assert ExperimentConfig(max_observations=10).max_observations==10
+    with pytest.raises(ValidationError):ExperimentConfig(max_observations=11)
     with pytest.raises(ValidationError):ExperimentConfig(unknown=True)
 
 

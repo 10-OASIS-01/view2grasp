@@ -118,6 +118,47 @@ def test_ik_observation_reselection_does_not_freeze_the_failed_ray(tmp_path):
     assert 'approach reselection step requires an observe action' in requests[1]['messages'][-1]['content']
 
 
+@pytest.mark.parametrize('reason',[
+    'all nominal gripper approaches intersect observed obstacles',
+    'all nominally unblocked candidates exhausted pregrasp IK seeds',
+    'all tested candidates failed pregrasp IK before spatial validity checks',
+])
+def test_approach_reselection_reports_the_actual_current_bounded_search_evidence(tmp_path,reason):
+    evidence={'frame_id':1,'camera_id':'activeview','reason':reason,
+        'kinematic_view_advice':{'views':[[-120,30,1.3]],'scope':'robot-only hypothesis'}}
+    history=[{'coverage_advice':{'views':[[90,0,1.3]]}}, {'approach_reselection':evidence}]
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'azimuth':-120,'elevation':30,'distance':1.3})}}]})))
+    try:client.decide(observation(),'Grasp the handle',history,force_observe=True,
+        observe_purpose='approach_reselection')
+    finally:client.client.close()
+    context=json.loads((tmp_path/'call_000.json').read_text())['request']['context']
+    actual=context['approach_reselection_context']
+    assert actual['reason']==reason and actual['evidence']==evidence
+    assert context['history']==history and 'mapping_context' not in context
+    assert 'Kinematic search found no valid pregrasp pose' not in actual['instructions']
+    assert 'neither establishes global infeasibility' in actual['instructions']
+    assert 'Revisiting an earlier view is allowed' in actual['instructions']
+    assert 'does not certify target visibility' in actual['instructions']
+
+
+@pytest.mark.parametrize('fault',['frame','camera'])
+def test_approach_reselection_does_not_present_stale_history_as_current_evidence(tmp_path,fault):
+    evidence={'frame_id':1,'camera_id':'activeview','reason':'old reason'}
+    evidence['frame_id' if fault=='frame' else 'camera_id']=99 if fault=='frame' else 'other'
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'azimuth':150,'elevation':15,'distance':.9})}}]})))
+    try:client.decide(observation(),'Grasp the handle',[{'approach_reselection':evidence}],
+        force_observe=True,observe_purpose='approach_reselection')
+    finally:client.client.close()
+    actual=json.loads((tmp_path/'call_000.json').read_text())['request']['context']['approach_reselection_context']
+    assert actual['evidence'] is None and actual['reason'] is None
+
+
 def test_current_frame_crop_annotation_logs_the_actual_input_image(tmp_path):
     obs=observation()
     provenance={'source_frame_id':obs.frame_id,'source_camera_id':obs.camera_id,

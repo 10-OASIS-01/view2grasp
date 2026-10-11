@@ -9,7 +9,7 @@ from view2grasp.types import AgentDecision,GraspCandidate,Observation
 
 
 def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observations=5,repeated_view=False,
-            reachable_views=True,semantic_error=False):
+            reachable_views=True,semantic_error=False,ranking_override=None):
     from view2grasp import runner,recording
     evidence=SimpleNamespace(frames=[],groundings=[],candidates=[],calls=[],events=[],moves=[],reachability=[],semantics=[])
     target=np.array([[.04+i*.001,-.12,.90] for i in range(20)])
@@ -52,7 +52,16 @@ def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observ
             self.closest_invalid=None;self.closest_by_failure={};self.best_unknown=None
         def choose(self,q,candidates,**kwargs):
             evidence.candidates.append(candidates)
-            if failure=='unknown':
+            if failure=='geometry':
+                self.checks+=1;self.last_failure='unknown space'
+                self.failure_counts={'pregrasp: unknown space':8,'pregrasp IK':16}
+                self.geometry_ranking={'status':'complete','input_candidates':20,
+                    'checked_candidates':20,'incomplete_candidates':0,'nominal_clear_candidates':2,
+                    'nominal_blocked_candidates':18,'selected_priority_candidates':2,
+                    'priority_candidates_completed':2,'priority_pregrasp_ik_attempts':16,
+                    'priority_pregrasp_ik_solutions':0}
+                self.geometry_ranking.update(ranking_override or {})
+            elif failure=='unknown':
                 self.checks+=1;self.last_failure='unknown space'
                 self.failure_counts={'pregrasp: unknown space':8}
             elif failure=='mixed':
@@ -62,7 +71,7 @@ def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observ
                 self.last_failure='planning budget exhausted: pregrasp IK' if failure=='budget' else 'pregrasp IK'
                 self.failure_counts={'pregrasp IK':8}
             return None
-        def recovery_unknown(self):return target[:1] if failure=='unknown' else np.empty((0,3))
+        def recovery_unknown(self):return target[:1] if failure in ('unknown','geometry') else np.empty((0,3))
 
     class Resolver:
         calls=0;seconds=0.;segmenter=None;sam_unavailable_reason='test'
@@ -80,6 +89,8 @@ def episode(tmp_path,monkeypatch,*,failure='ik',grounding_error=False,max_observ
             self.calls+=1;assert self.calls<=6
             evidence.calls.append({'frame_id':obs.frame_id,'kwargs':kwargs,
                 'history':json.loads(json.dumps(history))})
+            if 'current_frame_reselection' in kwargs:
+                return AgentDecision(action='abort',frame_id=obs.frame_id,reason='test stops second transaction')
             if kwargs.get('force_observe'):
                 view=obs.view if repeated_view else (140.,15.,.9)
                 return AgentDecision(action='observe',frame_id=obs.frame_id,
@@ -233,3 +244,51 @@ def test_empty_bounded_kinematic_advice_still_requires_new_image_and_grounding(t
     assert e.calls[1]['history'][-1]['approach_reselection']['kinematic_view_advice']['views']==[]
     assert e.reachability==[1] and e.frames==[1,2] and e.groundings==[1,2]
     assert result['attempts']==0 and result['observations']==2
+
+
+@pytest.mark.parametrize('ranking_override,reason',[
+    (None,'all nominally unblocked candidates exhausted pregrasp IK seeds'),
+    ({'nominal_clear_candidates':0,'nominal_blocked_candidates':20,
+        'selected_priority_candidates':0},'all nominal gripper approaches intersect observed obstacles'),
+])
+def test_complete_geometry_failure_requests_semantic_view_before_unknown_mapping(tmp_path,monkeypatch,ranking_override,reason):
+    result,e=episode(tmp_path,monkeypatch,failure='geometry',ranking_override=ranking_override)
+    assert e.calls[1]['kwargs']=={'force_observe':True,'observe_purpose':'approach_reselection'}
+    advice=e.calls[1]['history'][-1]['approach_reselection']
+    assert advice['reason']==reason and advice['checks_delta']==1
+    assert advice['total_reselections']==1 and advice['approach_reselection_count']==1
+    assert e.groundings==[1,2] and e.reachability==[1]
+    assert not any(row['kind']=='recovery_view_advice' for row in e.events)
+    assert result['observations']==2 and result['attempts']==0
+
+
+@pytest.mark.parametrize('ranking_override',[
+    {'status':'time_budget'}, {'incomplete_candidates':1,'checked_candidates':19},
+    {'priority_candidates_completed':1}, {'priority_pregrasp_ik_solutions':1},
+    {'selected_priority_candidates':1},
+])
+def test_partial_or_reachable_geometry_stays_mapping_only(tmp_path,monkeypatch,ranking_override):
+    result,e=episode(tmp_path,monkeypatch,failure='geometry',ranking_override=ranking_override)
+    assert e.calls[1]['kwargs']=={'force_observe':True}
+    assert e.groundings==[1] and e.candidates[0] is e.candidates[1]
+    assert not e.reachability and result['observations']==2
+
+
+def test_two_reselection_kinds_are_each_bounded_once(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,failure='geometry',max_observations=7)
+    approach=[row for row in e.events if row['kind']=='approach_reselection_advice']
+    current=[row for row in e.events if row['kind']=='current_frame_reselection_advice']
+    assert len(approach)==len(current)==1
+    assert approach[0]['total_reselections']==1 and current[0]['total_reselections']==2
+    assert current[0]['approach_reselection_count']==current[0]['current_frame_reselection_count']==1
+    assert e.reachability==[1,3] and result['observations']==3
+    assert result['failure']=='agent_abort: test stops second transaction' and result['attempts']==0
+
+
+def test_exhausted_pure_ik_reselection_cannot_fall_through_to_another_generic_view(tmp_path,monkeypatch):
+    result,e=episode(tmp_path,monkeypatch,max_observations=7)
+    assert e.frames==[1,2] and e.groundings==[1,2] and len(e.calls)==3
+    assert e.reachability==[1] and len(e.moves)==1
+    assert result['failure']=='planning: pregrasp IK; semantic view reselection limit reached'
+    assert e.events[-1]['kind']=='approach_reselection_limit'
+    assert e.events[-1]['total_reselections']==1 and result['attempts']==0

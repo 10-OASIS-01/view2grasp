@@ -1,0 +1,5 @@
+# M1 development only: one extra actual observation for evidence-based ray
+# reselection, keeping all three post-close views. Not a benchmark comparison.
+# Restore the ordinary 120 s planning allowance for the new approach/transit.
+max_observations: 10
+planning_seconds: 120

@@ -141,6 +141,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
         current_frame_reselection_used=False
+        approach_reselection_used=False
         def contact_annotation(observation,grounded_decision,original_object,original_part,purpose,*,source_supported=False):
             # One annotation transaction per frame. A second correction is
             # allowed only after measurable geometric progress; no new image.
@@ -366,12 +367,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     event('observation_budget_reserved',observations=record.observations,
                         reserved_after_close=reserve_after_close)
                     break
-                if (strategy=='active' and candidate_search_completed and checks_delta==0 and
+                pure_ik_failure=(candidate_search_completed and checks_delta==0 and
                         feedback=='pregrasp IK' and set(planner.failure_counts)=={'pregrasp IK'} and
-                        planner.failure_counts['pregrasp IK']>0):
-                    # No candidate reached a spatial validity check. More map
-                    # coverage cannot repair this ray's failed IK; acquire a
-                    # fresh semantic view before proposing a different ray.
+                        planner.failure_counts['pregrasp IK']>0)
+                geometry_reason=(_current_frame_reselection_reason(getattr(planner,'geometry_ranking',None))
+                    if task=='mug' and candidate_search_completed else None)
+                if (strategy=='active' and not approach_reselection_used and
+                        (pure_ik_failure or geometry_reason is not None)):
+                    # Check the complete nominal-geometry evidence before
+                    # spending mapping views on arm UNKNOWN. This is a bounded
+                    # search limitation, not proof that every ray is infeasible.
+                    approach_reselection_used=True
+                    reason=geometry_reason or 'all tested candidates failed pregrasp IK before spatial validity checks'
                     contact=np.asarray(anchor);ray=contact-obs.T_wc[:3,3]
                     ray=ray/np.linalg.norm(ray)
                     timer=time.monotonic()
@@ -380,11 +387,15 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     record.planning_seconds+=time.monotonic()-timer
                     advice={'purpose':'approach_reselection','frame_id':obs.frame_id,
                         'camera_id':obs.camera_id,'current_view':list(obs.view),
+                        'reason':reason,'geometry_ranking':copy.deepcopy(getattr(planner,'geometry_ranking',None)),
                         'observed_contact_world_m':contact.tolist(),
                         'camera_to_contact_ray':ray.tolist(),'approach_cone_degrees':15,
                         'failure_counts':dict(planner.failure_counts),'checks_delta':checks_delta,
                         'generated_candidates':len(candidates),
                         'kinematic_view_advice':kinematic_advice,
+                        'approach_reselection_count':1,
+                        'current_frame_reselection_count':int(current_frame_reselection_used),
+                        'total_reselections':1+int(current_frame_reselection_used),
                         'remaining_pregrasp_observations':pregrasp_limit-record.observations,
                         'reserved_post_close_observations':reserve_after_close,
                         'scope':'Observed contact and bounded robot-kinematics failures only; no map clearance or global infeasibility claim.',
@@ -398,11 +409,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     selected=np.array([next_decision.azimuth,next_decision.elevation,next_decision.distance])
                     delta=selected-np.asarray(obs.view);delta[0]=(delta[0]+180)%360-180
                     if np.all(np.abs(delta)<1e-6):
-                        record.failure='planning: pregrasp IK; approach recovery repeated the current view'
+                        record.failure='planning: '+feedback+'; approach recovery repeated the current view'
                         break
                     sim.move_camera(*selected)
                     history.append({'view':obs.view,'decision':next_decision.model_dump(),
-                        'feedback':'Acquiring a new semantic view after pure pregrasp IK failure; retire the old approach ray and re-ground from the next current image.'})
+                        'feedback':'Acquiring a new semantic view after bounded approach failure; retire the old approach ray and re-ground from the next current image.'})
                     obs=observe()
                     continue
                 recovery=None
@@ -416,6 +427,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 if recovery_points is not None and len(recovery_points):
                     recovery_points=np.asarray(recovery_points)
                     recovery_points=recovery_points[map_.classify(recovery_points)==UNKNOWN]
+                if (candidate_search_completed and approach_reselection_used and
+                        (pure_ik_failure or geometry_reason is not None) and
+                        (recovery_points is None or not len(recovery_points))):
+                    # Do not let the old generic observation fallback request
+                    # another semantic view for the same exhausted recovery.
+                    # Same-frame grounding repairs never reach this gate.
+                    record.failure='planning: '+feedback+'; semantic view reselection limit reached'
+                    event('approach_reselection_limit',reason=geometry_reason or 'pure pregrasp IK',
+                        approach_reselection_count=1,
+                        current_frame_reselection_count=int(current_frame_reselection_used),
+                        total_reselections=1+int(current_frame_reselection_used))
+                    break
                 if recovery_points is not None and len(recovery_points):
                     # Closing moves both the gripper and the target. A single
                     # orbit view cannot in general expose the whole arm corridor
@@ -489,7 +512,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                     chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
                         time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
-                    record.planning_seconds+=time.monotonic()-retry_timer
+                    retry_elapsed=time.monotonic()-retry_timer
+                    record.planning_seconds+=retry_elapsed
                     retry_feedback=planner.last_failure if chosen is None else "planned"
                     (out/f'planning_diagnostic_{obs.frame_id:03d}_recovery.json').write_text(json.dumps({
                         'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
@@ -509,6 +533,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                             # Explicitly end the old ray transaction before asking
                             # for fresh semantics; retain the final mapping slot.
                             current_frame_reselection_used=True
+                            timer=time.monotonic()
+                            kinematic_advice=suggest_reachable_views(robot,obs,candidates[0].surface_point,
+                                target_part,map_.surface,budget=3,max_ik_calls=72,
+                                time_budget=min(4.,max(0.,config.planning_seconds-retry_elapsed)))
+                            record.planning_seconds+=time.monotonic()-timer
                             advice={'purpose':'current_frame_reselection','frame_id':obs.frame_id,
                                 'camera_id':obs.camera_id,'current_view':list(obs.view),
                                 'retired_grounding_frame_id':decision.frame_id,
@@ -516,6 +545,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                 'failure_counts':dict(planner.failure_counts),
                                 'previous_observed_contact_world_m':candidates[0].surface_point.tolist(),
                                 'retired_camera_to_contact_ray':candidates[0].approach.tolist(),
+                                'kinematic_view_advice':kinematic_advice,
+                                'approach_reselection_count':int(approach_reselection_used),
+                                'current_frame_reselection_count':1,
+                                'total_reselections':1+int(approach_reselection_used),
                                 'remaining_pregrasp_observations':pregrasp_limit-record.observations,
                                 'reserved_post_close_observations':reserve_after_close,
                                 'acquires_new_observation':False,
@@ -525,7 +558,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                     'already-acquired image and freshly ground the complete visible object and '
                                     'requested grasp_part to form a NEW camera-to-contact ray. Do not copy old '
                                     'pixels or execute the prior contact with a changed ray. If semantics are '
-                                    'uncertain, observe within the remaining allowance or abort. All ordinary '
+                                    'uncertain, use the bounded robot-kinematics view advice to select an actual '
+                                    'observation within the remaining allowance, or abort. Semantic reselection '
+                                    'may revisit a useful earlier view; mapping-only novelty is not a requirement. '
+                                    'View advice does not establish visibility or map clearance. All ordinary '
                                     'grounding, candidate, UNKNOWN, collision and path checks remain required.'}
                             history.append({'current_frame_reselection':advice})
                             event('current_frame_reselection_advice',**advice)

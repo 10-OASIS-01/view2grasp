@@ -37,6 +37,8 @@ def test_current_frame_reselection_demands_fresh_roles_and_rejects_stale_groundi
     assert new['evidence']==evidence and new['acquires_new_observation'] is False
     assert new['frame_id']==1 and new['camera_id']=='activeview'
     assert 'NEW camera-to-contact ray' in new['instructions']
+    assert 'Revisiting an earlier view is allowed' in new['instructions']
+    assert 'advice does not prove visibility, free space or path safety' in new['instructions']
     first=json.loads((tmp_path/'call_000.json').read_text())
     assert 'fresh explicit object AND grasp_part' in first['error']
     assert json.loads((tmp_path/'call_001.json').read_text())['error'] is not None

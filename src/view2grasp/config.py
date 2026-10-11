@@ -9,9 +9,10 @@ import yaml
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     # Six remains the frozen default. Targeted perception development may use
-    # up to three extra closed-loop views for handled / holed geometry; this
-    # raises evidence, never weakens UNKNOWN.
-    max_observations: int = Field(default=6, ge=2, le=9)
+    # up to four extra closed-loop views for handled / holed geometry. The
+    # explicitly named development config records this larger evidence budget;
+    # comparisons must use the same budget and UNKNOWN remains unchanged.
+    max_observations: int = Field(default=6, ge=2, le=10)
     max_attempts: int = Field(default=2, ge=1, le=2)
     image_size: int = Field(default=512, ge=128, le=1024)
     voxel_resolution_m: float = Field(default=.005, ge=.002, le=.01)
