@@ -19,6 +19,7 @@ class DepthMap:
         self.home_tree=None; self.home_volumes=[]; self.target_tree=None; self.non_target_tree=None
         self.payload_tree=None;self.payload_xy_tree=None;self.payload_points=None
         self.table_z=None;self.table_hull=None
+        self.retained_endpoints=np.empty((0,3));self.retained_endpoint_tree=None
 
     def set_table(self,z):
         """Register the observed support plane and its observed XY convex hull."""
@@ -150,6 +151,9 @@ class DepthMap:
         self.views=[]; self.self_masks=[]; self.occlusion_masks=[]; self.surface=np.empty((0,3)); self.tree=None
         self.target_tree=None;self.non_target_tree=None;self.payload_tree=None
         self.payload_xy_tree=None;self.payload_points=None
+        # The entire source-evidence epoch ends here, including all measured
+        # surfaces/depth rays. This is not selective clearance of abstentions.
+        self.retained_endpoints=np.empty((0,3));self.retained_endpoint_tree=None
 
     def free_margin(self,points):
         """Signed observed-space margin for IK optimization, NOT an execution bypass."""
@@ -180,6 +184,37 @@ class DepthMap:
         self.payload_points=points.copy()
         self.payload_tree=cKDTree(points)
         self.payload_xy_tree=cKDTree(points[:,:2])
+
+    def retire_owned_source(self,ownership,source_obs):
+        """Retire only exact source endpoints after the caller carries them.
+
+        This does not alter contact masks, depth rays, or FREE certificates.
+        The accepted source cloud must already be in the collision envelope.
+        """
+        from .object_ownership import source_endpoint_retirement_mask
+        remove=source_endpoint_retirement_mask(self.surface,ownership,source_obs,table_z=self.table_z)
+        remove &= ~self._retained_endpoint_mask()
+        self.surface=self.surface[~remove]
+        self.tree=cKDTree(self.surface) if len(self.surface) else None
+        self._refresh_non_target()
+        return int(remove.sum())
+
+    def retain_observed_endpoints(self,points):
+        """Keep abstained measured endpoints through all dynamic retirement.
+
+        Numerical source equality only: no new occupancy or spatial halo is
+        introduced. The original depth rays remain unchanged.
+        """
+        points=np.asarray(points,dtype=float)
+        if points.ndim!=2 or points.shape[1:]!=(3,) or not np.isfinite(points).all():
+            raise ValueError('retained endpoints require finite observed points')
+        self.retained_endpoints=np.unique(np.vstack([self.retained_endpoints,points]),axis=0)
+        self.retained_endpoint_tree=cKDTree(self.retained_endpoints) if len(self.retained_endpoints) else None
+        self._refresh_non_target()
+
+    def _retained_endpoint_mask(self):
+        return (np.zeros(len(self.surface),dtype=bool) if self.retained_endpoint_tree is None else
+            self.retained_endpoint_tree.query(self.surface)[0]<=1e-9)
 
     def is_payload_source(self,points,radius=.00075):
         """Sparse observed payload surface neighborhood vacated by its motion.
@@ -227,6 +262,7 @@ class DepthMap:
         if self.target_tree is None:
             self.non_target_tree=self.tree;return
         keep=self.target_tree.query(self.surface,distance_upper_bound=.004)[0]>=.004
+        keep|=self._retained_endpoint_mask()
         self.non_target_tree=cKDTree(self.surface[keep]) if np.any(keep) else None
 
     def contact_allowed(self,points):
@@ -278,6 +314,7 @@ class DepthMap:
         radius=self.resolution*1.3 if radius is None else float(radius)
         keep=cKDTree(points).query(self.surface,distance_upper_bound=radius)[0]>radius
         if self.table_z is not None:keep|=np.abs(self.surface[:,2]-self.table_z)<.004
+        keep|=self._retained_endpoint_mask()
         self.surface=self.surface[keep]
         self.tree=cKDTree(self.surface) if len(self.surface) else None
         self._refresh_non_target()

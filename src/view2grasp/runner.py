@@ -22,6 +22,8 @@ from .grasp_semantics import check_vertical_part_midpoint
 from .annotation_diagnostic import build_annotation_diagnostic
 from .placement import tabletop_placement
 from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
+from .object_annotation import annotate_source_object
+from .payload_registration import register_payload_source,PayloadRegistrationError
 
 
 def _contact_annotation_progressed(previous, current):
@@ -121,6 +123,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
     pregrasp_limit=phase_budget.pregrasp_limit
     events=[]; history=[]; start=time.monotonic(); sim=None; vlm=None
     robot_depths={}
+    ownership_perception_seconds=0.
     rng=np.random.default_rng(seed)
     def event(kind,**kwargs):
         item={"elapsed":time.monotonic()-start,"kind":kind,**kwargs}; events.append(item)
@@ -688,6 +691,59 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 else:
                     obs=observe(); continue
             grasp,transit,approach=chosen
+            source_ownership=None;source_observation=None;current_ownership=[]
+            current_tracked_evidence=[]
+            registered_source=None
+            ownership_enabled=task=='mug' and config.source_object_ownership and record.attempts==0
+            identities={g.target_id for g in decision.groundings if g.role=='object'}
+            ownership_identity=next(iter(identities)) if len(identities)==1 else None
+            def annotate_owned(observation,reference,phase):
+                nonlocal ownership_perception_seconds
+                started=time.monotonic();inference_before=vlm.seconds
+                result=annotate_source_object(vlm,observation,reference,ownership_identity,map_.table_z,
+                    robot_depth=robot_depths.get(observation.frame_id),allow_partial_seed_components=True,
+                    target_description=decision.target)
+                ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
+                name=f'object_ownership_{phase}_{observation.frame_id:03d}'
+                (out/(name+'.json')).write_text(json.dumps(result.report,indent=2))
+                ownership=result.ownership
+                if ownership is not None:
+                    map_.retain_observed_endpoints(ownership.abstained_source_points)
+                    np.savez_compressed(out/(name+'.npz'),object_points=ownership.object_points,
+                        object_mask=ownership.object_mask,source_pixels_xy=ownership.source_pixels_xy,
+                        abstained_source_pixels_xy=ownership.abstained_source_pixels_xy)
+                event('source_object_annotation',frame_id=observation.frame_id,phase=phase,
+                    accepted=ownership is not None,semantic_requests=result.report['semantic_requests'],
+                    vlm_calls=result.report['vlm_calls'],
+                    object_points=0 if ownership is None else len(ownership.object_points))
+                return ownership
+            def measured_owned_points():
+                return (np.vstack([item.object_points for item,_ in current_ownership])
+                    if current_ownership else np.empty((0,3)))
+            def register_owned(frame_id):
+                nonlocal ownership_perception_seconds
+                if source_ownership is None:return None
+                # target may still contain a pre-close fallback when tracking
+                # failed. Registration must never self-match that historical
+                # reference as if it were newly measured after closure.
+                measured=np.vstack([*current_tracked_evidence,measured_owned_points()])
+                started=time.monotonic()
+                try:
+                    registration=register_payload_source(original_object,measured,source_ownership.object_points)
+                except PayloadRegistrationError as exc:
+                    event('source_payload_registration_rejected',frame_id=frame_id,diagnostics=exc.report)
+                    return None
+                finally:
+                    ownership_perception_seconds+=time.monotonic()-started
+                (out/f'source_payload_registration_{frame_id:03d}.json').write_text(json.dumps(registration.report,indent=2))
+                event('source_payload_registration',frame_id=frame_id,diagnostics=registration.report)
+                return registration
+            if ownership_enabled and ownership_identity is not None:
+                # The initial acquired overview complements the handle-side
+                # grasp image. No new camera frame or saved answer is supplied.
+                source_observation=map_.views[0]
+                source_ownership=annotate_owned(source_observation,original_object,'preclose')
+            ownership_reference=np.vstack([original_object,source_ownership.object_points]) if source_ownership is not None else original_object.copy()
             record.attempts+=1
             record.failure="";sim.episode_attempt=record.attempts
             execute(transit,-1,"pregrasp"); execute(approach,-1,"approach")
@@ -740,9 +796,19 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # verifies success if the observation budget is fully consumed.
             post_index=0;post_association=False
             post_limit=phase_budget.postclose_limit
-            max_post_views=reserve_after_close
+            # The opt-in source reconstruction can use an unspent pre-grasp
+            # slot for a genuinely missing carried surface. The episode limit
+            # and any post-lift reserve remain fixed; no extra images appear.
+            max_post_views=(post_limit-record.observations if ownership_enabled else reserve_after_close)
             while record.observations<post_limit and post_index<max_post_views:
-                sweep=np.vstack([target+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
+                coverage_payload=np.vstack([target,measured_owned_points()])
+                if source_ownership is not None:
+                    # Historical source pose is a visibility hypothesis until
+                    # current measured geometry supports a rigid registration.
+                    hypothesis=(registered_source.transformed_source_points if registered_source is not None
+                        else source_ownership.object_points)
+                    coverage_payload=np.vstack([coverage_payload,hypothesis])
+                sweep=np.vstack([coverage_payload+np.array([0.,0.,dz]) for dz in np.linspace(0,.13,14)])
                 sweep_unknown=sweep[map_.classify(sweep)==0]
                 leading=leading_shell(sweep_unknown,map_.resolution)
                 # Weight the leading boundary: it enters new space first. The
@@ -782,7 +848,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # avoids spending the only post-close frame on the arm while
                 # leaving the payload's millimetre-scale upper shadow unknown.
                 coverage_points=advice_points if len(advice_points) else required_points
-                focus=np.vstack([target,leading]) if len(leading) else target
+                focus=np.vstack([coverage_payload,leading]) if len(leading) else coverage_payload
                 # When any robot sweep point is unseen, do not let attractive
                 # target framing break visibility ties.  The target is already
                 # localized; this view exists first and foremost to certify the
@@ -793,7 +859,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # not make the camera model see through its observed surfaces.
                 # This local union changes visibility ranking only; it never
                 # reintroduces static obstacles or certifies UNKNOWN as free.
-                advice_occluders=np.vstack([map_.surface,target])
+                advice_occluders=np.vstack([map_.surface,coverage_payload])
                 payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
                     focus_points=focus_for_advice,observed_points=advice_occluders,
                     required_points=required_points if len(required_points) else None,
@@ -803,6 +869,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'static_surface_points':len(map_.surface),'payload_reference_points':len(target),
                     'scope':'Visibility prediction only; observed references do not certify current visibility.',
                     'visibility_prediction_tolerance_unchanged':True}
+                if ownership_enabled:
+                    payload_advice['source_ownership_coverage']={
+                        'actual_current_owned_points':len(measured_owned_points()),
+                        'historical_owned_points':0 if source_ownership is None else len(source_ownership.object_points),
+                        'registered_hypothesis':registered_source is not None,
+                        'scope':'View prediction only; no map, contact or FREE changes.'}
                 history.append({'coverage_advice':payload_advice,
                     'scene_changed_since_observation':post_index==0,'feedback':
                     'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})
@@ -836,6 +908,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 else:
                     current_target=resolver.track(obs,target,robot_depths.get(obs.frame_id),support_z=map_.table_z)
                 if current_target is not None and len(current_target)>=20:
+                    if ownership_enabled:current_tracked_evidence.append(current_target.copy())
                     # Different views expose different surfaces: a median shift
                     # is not object motion. Reassociate the contact neighborhood
                     # directly in the shared calibrated world frame.
@@ -850,10 +923,14 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     _,target_unique=np.unique(np.round(target/map_.resolution).astype(np.int32),axis=0,return_index=True)
                     target=target[target_unique]
                     map_.set_target(target_part)
+                if ownership_enabled and ownership_identity is not None:
+                    current_owned=annotate_owned(obs,ownership_reference,'postclose')
+                    if current_owned is not None:current_ownership.append((current_owned,obs))
+                    registered_source=register_owned(obs.frame_id)
                 # Occluded pick/place retires only the fresh explicit semantic
                 # association. A loose tracker over historical views can merge
                 # a nearby independent object and erase its collision evidence.
-                if task!='occluded':
+                if task!='occluded' and not ownership_enabled:
                     for prior_obs in map_.views:
                         seen=resolver.track(prior_obs,target,robot_depths.get(prior_obs.frame_id),support_z=map_.table_z)
                         if seen is not None:removed_sets.append(seen)
@@ -874,10 +951,35 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             p,R=robot.pose(sim.q)
             planner.attached=(target-p)@R
             planner.observed_payload_local=None
+            planner.registered_payload_local=None
             attached_part=(target_part-p)@R
             np.save(out/'payload_source_points.npy',target)
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
-            map_.set_payload_source(target)
+            actual_payload_source=target
+            if ownership_enabled:
+                # Current accepted material is observed, but not a new contact
+                # part. Represent it before exact same-source retirement.
+                measured_current=measured_owned_points()
+                if len(measured_current):
+                    planner.add_observed_payload(measured_current,p,R)
+                    actual_payload_source=np.vstack([actual_payload_source,measured_current])
+                # The last camera-only update already fitted these exact
+                # inputs. No physics or target update occurred since that fit.
+                if registered_source is not None:
+                    predicted=registered_source.transformed_source_points
+                    planner.registered_payload_local=(predicted-p)@R
+                    # ONLY the original measured source points enter this
+                    # certificate. Registered predictions cannot certify FREE.
+                    actual_payload_source=np.vstack([actual_payload_source,source_ownership.object_points])
+                    removed=map_.retire_owned_source(source_ownership,source_observation)
+                    event('source_object_retired',frame_id=source_observation.frame_id,
+                        exact_endpoints=removed,registered_collision_points=len(predicted))
+                for current_owned,current_source in current_ownership:
+                    removed=map_.retire_owned_source(current_owned,current_source)
+                    event('current_object_retired',frame_id=current_source.frame_id,exact_endpoints=removed)
+                np.save(out/'payload_actual_source_points.npy',actual_payload_source)
+                if registered_source is not None:np.save(out/'payload_registered_points.npy',registered_source.transformed_source_points)
+            map_.set_payload_source(actual_payload_source)
             map_.remove_target_endpoints(target)
             planner.begin_payload_lift()
             # Lift diagnostics must describe this phase, not the rejected
@@ -986,6 +1088,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 for _ in range(20): sim.step(sim.q,-1)
                 planner.attached=None; planner.gripper=None; map_.clear_dynamic()
                 if record.observations<pregrasp_limit: obs=observe(); continue
+                break
+            if ownership_enabled:
+                # This mug task ends after lift/hold verification. There is no
+                # later planner to benefit from a map refresh, and FK-predicted
+                # endpoints must not be promoted to measured source evidence.
                 break
             # The world is static except for the grasped target. Remove its old
             # endpoints, then exclude the observed held target from the obstacle map.
@@ -1135,7 +1242,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
         if vlm:
             record.vlm_calls=vlm.calls; record.inference_seconds=vlm.seconds; vlm.client.close()
         if 'resolver' in locals():
-            record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds
+            record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds+ownership_perception_seconds
         record.elapsed_seconds=time.monotonic()-start
         if sim:
             if sim.evaluator:

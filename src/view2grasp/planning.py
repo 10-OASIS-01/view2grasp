@@ -317,6 +317,9 @@ class Planner:
         # Additional strictly associated observed surfaces affect collision
         # checks only. They never change semantic references or finger contact.
         self.observed_payload_local=None
+        # Registration hypotheses add collision checks only. Keep them separate
+        # from actually observed points and from finger/contact permissions.
+        self.registered_payload_local=None
         self.allow_payload_support=False;self.payload_lift_origin=None
         self.failure_counts=Counter();self.best_bad=100000;self.best_unknown=None
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
@@ -344,8 +347,8 @@ class Planner:
 
     def payload_collision_local(self):
         """Original attachment plus new observations, without changing contact."""
-        if self.observed_payload_local is None:return self.attached
-        return np.vstack([self.attached,self.observed_payload_local])
+        extras=[p for p in (self.observed_payload_local,self.registered_payload_local) if p is not None]
+        return np.vstack([self.attached,*extras]) if extras else self.attached
 
     def recovery_unknown(self):
         """Representative actually-rejected unknown robot points for next view."""
@@ -423,6 +426,11 @@ class Planner:
                 p0,R0=self.payload_lift_origin
                 lift_source=payload_local@R0.T+p0
                 lift_shadow=self.map.payload_vertical_lift_shadow(lift_source,held)
+                # Registered historical points are pose predictions, not
+                # measured source surfaces. The legacy vertical-shadow rule
+                # cannot establish FREE for this appended hypothesis subset.
+                if self.registered_payload_local is not None and len(self.registered_payload_local):
+                    lift_shadow[-len(self.registered_payload_local):]=False
                 state[lift_shadow & (state==UNKNOWN)]=FREE
             if self.allow_payload_support and hasattr(self.map,'support_contact_allowed'):
                 state[(state==OCCUPIED)&self.map.support_contact_allowed(held)]=FREE

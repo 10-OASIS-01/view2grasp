@@ -20,6 +20,9 @@ class ExperimentConfig(BaseModel):
     # Mug-only same-frame crop refinement experiment. Disabled preserves the
     # original VLM call sequence and replay protocol.
     refine_grasp_grounding: bool = False
+    # Mug development: independently annotate acquired object surfaces and
+    # register historical ownership before using it as a carried envelope.
+    source_object_ownership: bool = False
     max_attempts: int = Field(default=2, ge=1, le=2)
     image_size: int = Field(default=512, ge=128, le=1024)
     voxel_resolution_m: float = Field(default=.005, ge=.002, le=.01)

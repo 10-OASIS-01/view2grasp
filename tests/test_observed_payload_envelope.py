@@ -84,3 +84,53 @@ def test_measured_world_surface_is_transformed_to_local_without_reference_drift(
     assert len(planner.observed_payload_local) == 1
     assert np.array_equal(planner.attached, original)
     assert np.allclose(planner.payload_collision_local(), np.vstack([original, local]))
+
+
+@pytest.mark.parametrize('state,noncontact,reason',[
+    (OCCUPIED, False, 'carried object observed obstacle'),
+    (UNKNOWN, False, 'carried object unknown space'),
+    (FREE, True, 'carried object intersects non-contact robot'),
+])
+def test_registered_historical_surface_still_blocks_unknown_and_collisions(state,noncontact,reason):
+    planner,original,new_side,source=planner_fixture(state,noncontact)
+    source.set_payload_source(original)  # Registration is not a measurement.
+    assert planner.valid(np.array([.1]))
+    planner.registered_payload_local=new_side.copy()
+    assert not planner.valid(np.array([.1]))
+    assert planner.last_failure==reason
+    assert not source.is_payload_source(new_side).any()
+    assert np.array_equal(planner.attached,original)
+
+
+def test_registered_surface_cannot_waive_unknown_at_a_finger_pad():
+    planner,original,new_side,source=planner_fixture()
+    source.set_target(original);source.set_payload_source(original)
+    planner.registered_payload_local=new_side.copy()
+    planner.robot.points=lambda q,g:(new_side.copy(),np.array([True]))
+    planner.map.classify=lambda p:np.where(p[:,0]>.015,UNKNOWN,FREE).astype(np.uint8)
+    planner.map.is_target=source.is_target
+    planner.map.contact_allowed=source.contact_allowed
+    assert not source.contact_allowed(new_side).any()
+    assert not planner.valid(np.zeros(1),contact=True)
+    assert planner.last_failure=='unknown space'
+
+
+@pytest.mark.parametrize('height',[0.,.005])
+def test_registered_prediction_cannot_use_short_vertical_shadow_as_free(height):
+    source=DepthMap();source.table_z=.8
+    actual=np.array([[0.,0.,.8]]);predicted=np.array([[.006,0.,1.]])
+    source.set_payload_source(actual)
+    source.classify=lambda points:np.full(len(points),UNKNOWN,dtype=np.uint8)
+    pose=np.zeros(3)
+    def points(q,grip):
+        pose[:]=[0.,0.,q[0]]
+        return np.empty((0,3)),np.empty(0,dtype=bool)
+    robot=SimpleNamespace(limits=np.array([[-1.,1.]]),points=points,
+        data=SimpleNamespace(contact=[]),pose=lambda:(pose.copy(),np.eye(3)))
+    planner=Planner(robot,source,np.random.default_rng(0));planner.attached=actual.copy()
+    planner.registered_payload_local=predicted.copy()
+    planner.begin_payload_lift();planner.allow_payload_support=True
+    assert not source.is_payload_source(predicted).any()
+    assert not planner.valid(np.array([height]))
+    assert planner.last_failure=='carried object unknown space'
+    assert planner.payload_invalid['unknown']==1
