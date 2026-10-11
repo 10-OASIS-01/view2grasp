@@ -7,3 +7,5 @@ planning_seconds: 120
 # This adds a model call, not a new observation or an automatic contact label.
 refine_grasp_grounding: true
 source_object_ownership: true
+# Try distinct candidate poses before spending eight IK/RRT restarts on one.
+diversify_grasp_attempts: true

@@ -36,10 +36,10 @@ def test_observation_grounding_planner_recording_pipeline(tmp_path,monkeypatch):
 def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
                     strategy='active',max_observations=9,always_observe=False,task='mug',
                     rejection_state=0,observe_until_grounding_deadline=False,
-                    retire_payload_from_surface=False):
+                    retire_payload_from_surface=False,diversify_grasp_attempts=False):
     """Exercise the runner's real recovery transaction without rendering or VLM IO."""
     from view2grasp import runner,recording
-    evidence=SimpleNamespace(observed=[],executed=[],advice=[],advice_inputs=[],events=[],planning_frames=[],vlm=[])
+    evidence=SimpleNamespace(observed=[],executed=[],advice=[],advice_inputs=[],events=[],planning_frames=[],planning_options=[],vlm=[])
     points=np.array([[i*.001,0.,1.] for i in range(20)])
     grasp=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=points[0],grasp_center=points[0])
@@ -96,6 +96,7 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         def choose(self,q,candidates,**kwargs):
             self.calls+=1;self.checks=self.calls
             evidence.planning_frames.append(len(self.map.views))
+            evidence.planning_options.append(kwargs.copy())
             if planned_on is not None and self.calls>=planned_on:
                 return candidates[0],np.array([q,q]),np.array([q,q])
             return None
@@ -158,8 +159,21 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
     monkeypatch.setattr(runner,'save_episode',lambda out,sim,record,events:evidence.events.extend(events))
     result=runner.run_episode(task,3,strategy,tmp_path,replay=tmp_path/'offline',
-        config=runner.ExperimentConfig(max_observations=max_observations))
+        config=runner.ExperimentConfig(max_observations=max_observations,
+            diversify_grasp_attempts=diversify_grasp_attempts))
     return result,evidence
+
+
+@pytest.mark.parametrize('task,enabled,expected',[
+    ('mug',False,False),('mug',True,True),('block',True,False)])
+def test_attempt_diversity_is_opt_in_mug_only_across_all_replanning_transactions(
+        tmp_path,monkeypatch,task,enabled,expected):
+    result,evidence=_budget_episode(tmp_path,monkeypatch,recovery_views=4,task=task,
+        diversify_grasp_attempts=enabled)
+    assert len(evidence.planning_options)==3 and result['attempts']==0
+    assert all(options['diversify_attempts'] is expected for options in evidence.planning_options)
+    assert all(options['time_budget']==120 and options['max_candidates']==48
+        for options in evidence.planning_options)
 
 
 @pytest.mark.parametrize('recovery_views,planned_on,expected_planning_frames,post_frames',[

@@ -23,6 +23,9 @@ class ExperimentConfig(BaseModel):
     # Mug development: independently annotate acquired object surfaces and
     # register historical ownership before using it as a carried envelope.
     source_object_ownership: bool = False
+    # Mug development: share the existing search budget across candidate poses
+    # before repeating redundant-IK seeds for any one pose.
+    diversify_grasp_attempts: bool = False
     max_attempts: int = Field(default=2, ge=1, le=2)
     image_size: int = Field(default=512, ge=128, le=1024)
     voxel_resolution_m: float = Field(default=.005, ge=.002, le=.01)

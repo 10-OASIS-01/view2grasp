@@ -428,7 +428,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     grasp_center_offset=robot.grasp_center_offset())
                 planning_rng_state=copy.deepcopy(planner.rng.bit_generator.state)
                 chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
-                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
+                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug',
+                    diversify_attempts=task=='mug' and config.diversify_grasp_attempts)
                 candidate_search_completed=True
                 (out/f'planning_diagnostic_{obs.frame_id:03d}.json').write_text(json.dumps({
                     'failure_counts':planner.failure_counts,'closest_invalid':planner.closest_invalid,
@@ -608,7 +609,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # fresh random elbow branch creates new unseen space.
                     planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                     chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
-                        time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
+                        time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug',
+                        diversify_attempts=task=='mug' and config.diversify_grasp_attempts)
                     retry_elapsed=time.monotonic()-retry_timer
                     record.planning_seconds+=retry_elapsed
                     retry_feedback=planner.last_failure if chosen is None else "planned"
@@ -706,7 +708,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                 residual_timer=time.monotonic()
                                 planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                                 chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,
-                                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug')
+                                    time_budget=config.planning_seconds,prioritize_gripper_geometry=task=='mug',
+                                    diversify_attempts=task=='mug' and config.diversify_grasp_attempts)
                                 record.planning_seconds+=time.monotonic()-residual_timer
                                 residual_feedback=planner.last_failure if chosen is None else 'planned'
                                 (out/f'planning_diagnostic_{obs.frame_id:03d}_residual.json').write_text(json.dumps({

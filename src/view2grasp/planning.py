@@ -538,7 +538,7 @@ class Planner:
             path.append(q)
         return np.array(path)
 
-    def choose(self,q,candidates,max_candidates=48,time_budget=120,*,prioritize_gripper_geometry=False):
+    def choose(self,q,candidates,max_candidates=48,time_budget=120,*,prioritize_gripper_geometry=False,diversify_attempts=False):
         # Diagnostics and targeted next-view advice describe this planning
         # attempt only. Keeping an earlier one-point miss would send recovery
         # toward a region that a later observation may already have revealed.
@@ -548,7 +548,7 @@ class Planner:
         self.geometry_ranking={}
         self._geometry_time_budget=min(8.,max(0.,float(time_budget))*.25)
         self.deadline=time.monotonic()+time_budget
-        try:return self._choose(q,candidates,max_candidates,prioritize_gripper_geometry)
+        try:return self._choose(q,candidates,max_candidates,prioritize_gripper_geometry,diversify_attempts)
         except PlanningBudgetExceeded:
             cause="unknown space" if len(self.recovery_unknown()) else self.last_failure
             self.last_failure="planning budget exhausted: "+cause
@@ -629,7 +629,7 @@ class Planner:
         else:candidates=candidates[:max_candidates]
         return candidates
 
-    def _choose(self,q,candidates,max_candidates,prioritize_gripper_geometry=False):
+    def _choose(self,q,candidates,max_candidates,prioritize_gripper_geometry=False,diversify_attempts=False):
         candidates=list(candidates)
         _,current_R=self.robot.pose(q)
         preferred=(self._geometry_priority(q,candidates) if prioritize_gripper_geometry else [])
@@ -647,12 +647,18 @@ class Planner:
         self.geometry_ranking['selected_priority_candidates']=len(first)
         self.geometry_ranking['selected_candidate_indices']=[indices[id(g)] for g in selected]
         self.geometry_ranking.update(priority_pregrasp_ik_attempts=0,
-            priority_pregrasp_ik_solutions=0,priority_candidates_completed=0)
+            priority_pregrasp_ik_solutions=0,priority_candidates_completed=0,
+            attempt_order='round_robin' if diversify_attempts else 'candidate_major')
         candidates=selected
-        for g in candidates:
+        # Opt in to one multistart attempt per selected candidate per round.
+        # Keep the selected order, each candidate's seed schedule, and the
+        # shared deadline; a slow transit must not consume eight turns first.
+        batches=(((g,(attempt,)) for attempt in range(8) for g in candidates)
+            if diversify_attempts else ((g,range(8)) for g in candidates))
+        for g,attempts in batches:
             pre=g.position-g.approach*.08
             priority=id(g) in seen
-            for attempt in range(8):
+            for attempt in attempts:
                 if self.deadline is not None and time.monotonic()>=self.deadline:
                     raise PlanningBudgetExceeded
                 seed=q if attempt==0 else np.clip(q+self.rng.normal(0,.25 if attempt<4 else .8,7),self.robot.limits[:,0]+.02,self.robot.limits[:,1]-.02)
@@ -675,7 +681,7 @@ class Planner:
                 transit=self.plan(q,qp)
                 if transit is not None: return g,transit,approach
                 self.failure_counts[self.last_failure]+=1
-            if priority:self.geometry_ranking['priority_candidates_completed']+=1
+            if priority and attempt==7:self.geometry_ranking['priority_candidates_completed']+=1
         # A single rejected sample must not mask a systematic geometric or IK
         # failure after a recovery view. Ask for more mapping only when unknown
         # space is a material share of the observed candidate failures.
