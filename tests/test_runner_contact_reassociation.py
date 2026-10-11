@@ -21,10 +21,12 @@ from view2grasp.types import GraspCandidate
     ('accepted',False,False,'cropped'),('accepted',False,False,'fallback'),
     ('repair_then_accept',False,False,'cropped'),
     ('progress_then_accept',False,False,'cropped'),('progress_then_reject',False,False,'cropped'),
+    ('accepted',False,False,'multiple_mapping_views'),
 ])
 def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         tmp_path,monkeypatch,annotation_outcome,post_close,post_lift,crop_mode):
     from view2grasp import runner,recording
+    multiple_mapping_views=crop_mode=='multiple_mapping_views'
     sample,xyz,mask,part_reference=scene()
     padding=200 if crop_mode=='cropped' else 0
     if padding:
@@ -36,9 +38,10 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         xyz=unproject(np.stack([u,v],-1),depth,K,sample.T_wc)
     original_part=np.zeros_like(mask);original_part[10+padding:14+padding,8+padding:10+padding]=True
     part_reference=xyz[original_part]
-    original_object=xyz[mask]
+    original_object=part_reference.copy() if multiple_mapping_views else xyz[mask]
     evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[],
-        removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[],annotation_shapes=[],association_shapes=[])
+        removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[],annotation_shapes=[],association_shapes=[],
+        association_frames=[],association_references=[],planning_association_frames=[])
     candidate=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=part_reference[0],grasp_center=part_reference[0])
     original_ray=candidate.approach.copy()
@@ -105,6 +108,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         def recovery_unknown(self):return original_object[:1]
         def choose(self,q,candidates,**kwargs):
             evidence.candidate_lists.append(candidates)
+            evidence.planning_association_frames.append(evidence.association_frames.copy())
             self.calls+=1;self.checks+=1
             if post_close and self.calls==2:return candidates[0],np.array([q,q]),np.array([q,q])
             return None
@@ -119,7 +123,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             self.calls=0;self.seconds=0.;self.client=SimpleNamespace(close=lambda:None)
         def decide(self,obs,instruction,history,**kwargs):
             self.calls+=1;evidence.vlm_calls.append((obs.frame_id,kwargs,json.loads(json.dumps(history))))
-            assert self.calls<=(9 if post_close else 5),'annotation must not create an unbounded repair loop'
+            assert self.calls<=(9 if post_close else 7 if multiple_mapping_views else 5),'annotation must not create an unbounded repair loop'
             if self.calls==1:
                 return annotations(obs,mask,original_part).model_copy(update={'action':'grasp'})
             if 'contact_reassociation' not in history[-1]:
@@ -177,6 +181,8 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     original_reassociate=resolver.reassociate_contact
     def reassociate(obs,decision,*args):
         evidence.association_shapes.append(obs.depth.shape)
+        evidence.association_frames.append(obs.frame_id)
+        evidence.association_references.append((args[0].copy(),args[1].copy()))
         assert obs.depth.shape==sample.depth.shape
         assert all(tuple(g.mask_size)==sample.depth.shape for g in decision.groundings)
         assert args[-1].shape==sample.depth.shape # Original known-robot depth, not the cropped grid.
@@ -205,7 +211,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         if 'required_points' in kwargs:
             assert len(kwargs['semantic_focus'])>=len(original_object)
         else:assert 'semantic_focus' not in kwargs
-        return {'views':[[0.,55.,.8]]}
+        return {'views':[[0.,55.,.8],[90.,55.,.8]] if multiple_mapping_views else [[0.,55.,.8]]}
     monkeypatch.setattr(runner,'suggest_views',view_advice)
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
     monkeypatch.setattr(runner,'time_parameterize',lambda path:path)
@@ -215,7 +221,27 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         def unavailable_crop(*args,**kwargs):raise ValueError('reference projection is outside current image')
         monkeypatch.setattr(runner,'crop_observation',unavailable_crop)
     result=runner.run_episode('occluded',3,'active',tmp_path,replay=tmp_path/'offline',
-        config=runner.ExperimentConfig(max_observations=4,perception_backend='rgbd'))
+        config=runner.ExperimentConfig(max_observations=6 if multiple_mapping_views else 4,perception_backend='rgbd'))
+
+    if multiple_mapping_views:
+        # Frames 2 and 3 belong to the SAME multi-view recovery loop. The old
+        # end-of-loop call annotated only frame 3 and silently skipped frame 2;
+        # frame 4 separately exercises the reserved residual-recovery branch.
+        assert result['observations']==4 and result['vlm_calls']==7 and result['attempts']==0
+        assert evidence.observations==[1,2,3,4] and len(evidence.cameras)==3
+        assert evidence.association_frames==[2,3,4]
+        assert evidence.planning_association_frames==[[],[2,3],[2,3,4]]
+        assert evidence.targets[0].shape==(8,3) and all(len(points)==16 for points in evidence.targets[1:])
+        assert all(np.array_equal(obj,original_object) and np.array_equal(part,part_reference)
+            for obj,part in evidence.association_references)
+        assert all(items is evidence.candidate_lists[0] for items in evidence.candidate_lists)
+        assert np.array_equal(candidate.approach,original_ray)
+        associated=[e for e in evidence.events if e['kind']=='contact_association']
+        assert [e['frame_id'] for e in associated]==[2,3,4]
+        assert all(e['preserved_grounding_frame']==1 and not e['grasp_ray_changed'] for e in associated)
+        assert not evidence.executed and not evidence.removal_requests
+        assert not (tmp_path/'occluded_active_0003/error.txt').exists()
+        return
 
     assert result['observations']==(4 if post_close else 2)
     repairs=[e for e in evidence.events if e['kind']=='contact_annotation_repair']

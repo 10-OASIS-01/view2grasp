@@ -204,6 +204,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 object_points=association.object_points,part_points=association.part_points)
             (out/f'contact_association_{observation.frame_id:03d}.json').write_text(json.dumps(report,indent=2))
             event('contact_association',**report)
+            history.append({'contact_association_result':report,
+                'feedback':'Current-frame annotation verified. Resume the surrounding mapping or execution transaction; the original grasp ray and remaining coverage advice are unchanged.'})
             return association
         def reassociate_contacts(observation,grounded_decision,original_object,original_part,target,target_part):
             association=contact_annotation(observation,grounded_decision,original_object,original_part,
@@ -418,6 +420,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                             combined=np.vstack([target,newly_seen])
                             _,unique=np.unique(np.round(combined/map_.resolution).astype(np.int32),axis=0,return_index=True)
                             target=combined[unique]
+                        if recovery is not None:
+                            # Every acquired mapping image can expose a
+                            # different target side. Verify it while available;
+                            # the final view alone may hide those old endpoints.
+                            # References stay fixed and the grasp ray is kept.
+                            target,target_part=reassociate_contacts(obs,decision,
+                                original_object,original_part,target,target_part)
                     if pending_decision is not None:continue
                     if not recovered: break
                     if recovery is None:
@@ -427,7 +436,6 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # The scene has not moved. Preserve the VLM-selected point,
                     # camera ray and candidates; the extra view exists to reveal
                     # planning space, not silently change the grasp direction.
-                    target,target_part=reassociate_contacts(obs,decision,original_object,original_part,target,target_part)
                     retry_timer=time.monotonic()
                     # Reuse the exact redundant-IK and RRT samples whose rejected
                     # workspace points produced the recovery advice. Otherwise a
@@ -678,6 +686,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             map_.set_payload_source(target)
             map_.remove_target_endpoints(target)
             planner.begin_payload_lift()
+            # Lift diagnostics must describe this phase, not the rejected
+            # pregrasp branches retained from the preceding candidate search.
+            planner.closest_by_failure={};planner.closest_invalid=None;planner.payload_invalid=None
             # Build a lift path from robot proprioception and observed grasp geometry.
             lift=[sim.q];lift_timer=time.monotonic()
             planner.allow_payload_support=True
