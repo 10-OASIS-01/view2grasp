@@ -21,19 +21,32 @@ from .vlm import VLM
 from .view_advisor import suggest_mounted_cameras
 
 
-def grounded_world(obs,g):
+def grounded_world(obs,g,*,floor_z=None):
+    """Resolve an image grounding; navigation regions use observed floor only."""
     if g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id:raise ValueError('stale grounding')
+    navigation_floor=floor_z if g.role=='navigation_goal' else None
     if g.kind=='points':xy=g.points[0]
     else:
         mask=proposal_mask(g,obs)
         import cv2
         mask &= np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)
+        if navigation_floor is not None:
+            # A broad proposed region can contain both floor and a cabinet or
+            # wall. Select its interior after applying the same floor-height
+            # requirement as an explicit point; never move a supplied point.
+            v,u=np.where(mask)
+            world=unproject(np.stack([u,v],axis=-1),obs.depth[v,u],obs.K,obs.T_wc)
+            mask[v,u] &= np.abs(world[:,2]-navigation_floor)<=.06
+            if not mask.any():raise ValueError('grounding: navigation region has no observed floor')
         d=cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,3)
         if d.max()==0:raise ValueError('grounding has no valid interior')
         y,x=np.unravel_index(d.argmax(),d.shape);h,w=d.shape;xy=(x/(w-1),y/(h-1))
     uv=pixels([xy],obs.depth.shape)[0];depth=obs.depth[uv[1],uv[0]]
     if not np.isfinite(depth) or not .05<depth<10:raise ValueError('invalid grounding depth')
-    return unproject(uv,depth,obs.K,obs.T_wc)
+    position=unproject(uv,depth,obs.K,obs.T_wc)
+    if navigation_floor is not None and abs(position[2]-navigation_floor)>.06:
+        raise ValueError('grounding: navigation goal is not on observed floor')
+    return position
 
 
 def support_plane(points,anchor=None):
@@ -391,9 +404,9 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 if decision.action=='navigate':
                     goals=[g for g in decision.groundings if g.role=='navigation_goal']
                     if not goals:raise ValueError('grounding: navigation_goal required')
-                    position=grounded_world(obs,goals[0]);_,floor=support_plane(navmap.surface)
+                    _,floor=support_plane(navmap.surface)
                     floor_z=float(np.median(floor[:,2]))
-                    if abs(position[2]-floor_z)>.06:raise ValueError('grounding: navigation goal is not on observed floor')
+                    position=grounded_world(obs,goals[0],floor_z=floor_z)
                     look=[g for g in decision.groundings if g.role=='look_at']
                     direction=grounded_world(obs,look[0])[:2]-position[:2] if look else position[:2]-sim.base_pose[:2]
                     goal=np.r_[position[:2],np.arctan2(direction[1],direction[0])]

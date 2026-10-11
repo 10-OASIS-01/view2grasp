@@ -30,6 +30,66 @@ def test_world_grounding_rejects_wrong_camera_and_invalid_depth():
     with pytest.raises(ValueError,match='depth'):grounded_world(obs,p)
 
 
+def navigation_region_scene(kind='box',role='navigation_goal'):
+    obs=observation()
+    # Downward calibrated camera: depth 1 is an elevated surface, depth 2 is
+    # floor at world z=0. The generic region center is on the elevated surface.
+    obs.T_wc[:3,:3]=np.diag([1.,-1.,-1.]);obs.T_wc[2,3]=2.
+    obs.depth[10:24,21:28]=2.
+    obs.depth[10,21]=np.nan;obs.depth[11,21]=0.
+    region={'box':(.1,.1,.9,.9)} if kind=='box' else {
+        'points':[(.1,.1),(.9,.1),(.9,.9),(.1,.9)]}
+    return obs,GroundingProposal(kind=kind,role=role,frame_id=1,**region)
+
+
+@pytest.mark.parametrize('kind',['box','polygon'])
+def test_navigation_region_selects_observed_floor_before_its_interior(kind):
+    from view2grasp.geometry import project
+    from view2grasp.grounding import proposal_mask
+    obs,proposal=navigation_region_scene(kind)
+    assert grounded_world(obs,proposal)[2]==pytest.approx(1.)
+    world=grounded_world(obs,proposal,floor_z=0.)
+    assert world[2]==pytest.approx(0.)
+    uv,_=project(world[None],obs.K,obs.T_wc);u,v=np.rint(uv[0]).astype(int)
+    assert proposal_mask(proposal,obs)[v,u]
+    assert 21<=u<28 and 10<=v<24 and np.isfinite(obs.depth[v,u])
+
+
+@pytest.mark.parametrize('kind',['box','polygon'])
+def test_navigation_region_without_floor_does_not_borrow_floor_outside_it(kind):
+    obs,proposal=navigation_region_scene(kind)
+    obs.depth[:]=1.;obs.depth[:2,:2]=2.
+    with pytest.raises(ValueError,match='navigation region has no observed floor'):
+        grounded_world(obs,proposal,floor_z=0.)
+
+
+def test_navigation_point_is_not_moved_to_nearby_floor():
+    obs,_=navigation_region_scene()
+    proposal=GroundingProposal(kind='points',role='navigation_goal',frame_id=1,points=[(.5,.5)])
+    with pytest.raises(ValueError,match='navigation goal is not on observed floor'):
+        grounded_world(obs,proposal,floor_z=0.)
+    obs.depth[16,16]=1.941
+    assert grounded_world(obs,proposal,floor_z=0.)[2]==pytest.approx(.059)
+    obs.depth[16,16]=1.939
+    with pytest.raises(ValueError,match='navigation goal is not on observed floor'):
+        grounded_world(obs,proposal,floor_z=0.)
+
+
+@pytest.mark.parametrize('change',[{'frame_id':2},{'camera_id':'wrist'}])
+def test_navigation_floor_filter_preserves_frame_and_camera_validation(change):
+    obs,proposal=navigation_region_scene()
+    with pytest.raises(ValueError,match='stale grounding'):
+        grounded_world(replace(obs,**change),proposal,floor_z=0.)
+
+
+@pytest.mark.parametrize('role',['object','place_region','look_at'])
+def test_non_navigation_region_keeps_generic_grounding_semantics(role):
+    obs,proposal=navigation_region_scene(role=role)
+    original=grounded_world(obs,proposal)
+    assert original[2]==pytest.approx(1.)
+    assert np.array_equal(grounded_world(obs,proposal,floor_z=0.),original)
+
+
 def test_support_plane_not_tied_to_tabletop_world_origin():
     points=np.array([[x,y,.82] for x in np.linspace(2,2.4,20) for y in np.linspace(3,3.4,20)])
     height,selected=support_plane(points,anchor=np.array([2.2,3.2,.92]))
