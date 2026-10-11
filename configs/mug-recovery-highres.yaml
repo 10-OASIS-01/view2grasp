@@ -1,0 +1,9 @@
+# M1 development: native 1024-pixel RGB-D for the thin, partly occluded handle.
+# This changes image evidence resolution; do not compare it as the 512px benchmark.
+# Observation, search, contact and collision limits match mug-recovery.yaml.
+image_size: 1024
+max_observations: 10
+planning_seconds: 120
+refine_grasp_grounding: true
+source_object_ownership: true
+diversify_grasp_attempts: true
