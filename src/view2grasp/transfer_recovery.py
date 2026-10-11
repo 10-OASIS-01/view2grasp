@@ -28,6 +28,13 @@ def tabletop_observation_budget(task, maximum, postlift_observations=0):
         maximum - reserved, postclose, reserved)
 
 
+def different_tabletop_view(view, current):
+    """Camera-only recovery requires a new view, including azimuth wraparound."""
+    delta = np.asarray(view, dtype=float) - np.asarray(current, dtype=float)
+    delta[0] = (delta[0] + 180.) % 360. - 180.
+    return bool(np.any(np.abs(delta) > 1e-6))
+
+
 @dataclass
 class TransferAttempt:
     path: np.ndarray | None

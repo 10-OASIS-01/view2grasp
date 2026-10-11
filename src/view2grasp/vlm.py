@@ -130,6 +130,16 @@ fields: do not send null or numeric placeholders for them.
 If must_ground_now is true, grasp or abort. If must_observe_now is true, observe.
 Unknown-space rejection means acquire relevant additional observations. Respect
 remaining budgets. finish reports a visual hypothesis, not evaluator success.
+held_verification_context is a separate camera-only transaction after lifting.
+Its priority is to clearly see the SAME held object and permitted part in ONE
+different real view, so their explicit annotations can be checked. It supplies
+NO UNKNOWN path evidence: do not prefer corridor coverage over recognizing the
+held material. Keep the robot, fixed attachment reference and original grasp
+ray unchanged; never propose a new grasp. The attachment projection and view
+advice are hypotheses, not current visibility, grasp success or motion approval.
+An earlier pre-lift camera view may be revisited. Only one reserved observation
+remains; using it leaves none for transfer mapping. Strict verification follows.
+The mapping-only coverage preferences below do not apply to this transaction.
 Tabletop mapping-only recovery preserves the previously grounded grasp and its
 camera-to-contact approach ray. The recovery camera does NOT select a new grasp
 approach: it should reveal UNKNOWN space along the stored robot/payload path.
@@ -198,6 +208,36 @@ def _mapping_context(obs,history):
             'scene_changed_since_observation':stale_image,
             'views_in_current_transaction':views,
             'unvisited_advised_views':[view for view in offered if key(view) not in seen]}
+
+
+def _held_verification_context(obs,history):
+    # Only the latest explicit transaction can override mapping semantics.
+    # An older held request must not become active again after another event.
+    latest=history[-1] if history and isinstance(history[-1],dict) else {}
+    verification=latest.get('held_verification');advice=latest.get('coverage_advice')
+    if (not isinstance(verification,dict) or not isinstance(advice,dict)
+            or verification.get('frame_id')!=obs.frame_id or verification.get('camera_id')!=obs.camera_id
+            or verification.get('strict_association_verified') is not False
+            or type(verification.get('remaining_real_observations')) is not int
+            or verification['remaining_real_observations']!=1
+            or type(verification.get('remaining_transfer_mapping_observations_after_this_view')) is not int
+            or verification['remaining_transfer_mapping_observations_after_this_view']!=0
+            or advice.get('purpose')!='held_object_verification'):
+        return None
+    current=_mapping_context(obs,history)
+    return {'purpose':'held_object_verification','frame_id':obs.frame_id,'camera_id':obs.camera_id,
+        'current_view':list(obs.view),'remaining_real_observations':1,
+        'remaining_transfer_mapping_observations_after_this_view':0,
+        'latest_coverage_advice':copy.deepcopy(advice),
+        'different_advised_views':current['unvisited_advised_views'],
+        'instructions':'Choose ONE DIFFERENT real camera view that clearly exposes the SAME held object '
+            'and permitted part for strict annotation. This is held-material verification, not UNKNOWN-path '
+            'coverage: no rejected path samples are supplied. Keep the robot, fixed attachment reference '
+            'and original grasp ray unchanged. Do not re-ground or propose a new grasp. The latest advice '
+            'is only a visibility hypothesis; it does not establish that the object is held or approve motion. '
+            'An earlier pre-lift view may be revisited if different from the current view. This consumes '
+            'the last reserved real observation and leaves no transfer mapping observation. After acquisition, '
+            'the same object and part still need explicit semantic, RGB-D and measured-lift verification.'}
 
 
 def _tabletop_camera_context(obs):
@@ -352,7 +392,13 @@ class VLM:
                     'Observation reserves and all safety checks remain in force.'}
         if force_observe and obs.base_pose is None:
             if observe_purpose=='mapping_only':
-                user['mapping_context']=_mapping_context(obs,history)
+                held_context=_held_verification_context(obs,history)
+                if held_context is not None:
+                    user['held_verification_context']=held_context
+                    user['response_contract']+=(' This is held-object verification: return observe to choose ONE '
+                        'different real view of the same held object and permitted part, not an UNKNOWN corridor '
+                        'or a new grasp. Only one reserved observation remains.')
+                else:user['mapping_context']=_mapping_context(obs,history)
             elif observe_purpose=='approach_reselection':
                 evidence=next((item['approach_reselection'] for item in reversed(history)
                     if isinstance(item,dict) and isinstance(item.get('approach_reselection'),dict)),None)
@@ -472,6 +518,8 @@ class VLM:
                 if force_observe and decision.action != "observe":
                     purpose=observe_purpose.replace('_',' ')
                     detail='annotate the supplied image' if observe_purpose=='annotation' else 'collect additional geometry'
+                    if 'held_verification_context' in user:
+                        purpose='held object verification';detail='verify the same held object and permitted part'
                     raise ValueError(f'this {purpose} step requires an observe action to {detail}')
                 last_error=None
                 return decision

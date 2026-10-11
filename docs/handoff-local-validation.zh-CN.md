@@ -140,6 +140,9 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 ## 工程与环境验证
 
+- `67096e1` 修正仅由区域提案推导的长条部位接触代表点：从当前实测部位主轴的稳健跨度中央三分之一选择原掩膜内的内部点，避免较宽连接处占据全局最大内切距离；显式种子、非长条旧规则、深度连通性和碰撞容差保持不变。这只是已观察区域的代表点，不补全隐藏杆件。保存帧重解析中，接触高度由约 0.81818 m 变为 0.90133 m；物体 2553 像素与部位 331 像素掩膜逐点不变。证据：`artifacts/handoff/mug-11-contact-selection-audit.json`，不能替代在线路径和执行验证。
+- 抬升后的第一次严格语义关联失败时，允许在原有两张预留图以内用最后一张不同视角复核；成功后没有搬运补图额度，失败仍返回释放。关联已经通过但实测高度不足时不能借此重试。持物复查使用专用、最新且同帧同相机的提示，优先确认同一对象与部位，不沿用 UNKNOWN 路径覆盖要求。完整原生回归 **695 项通过**，耗时 10.66 s，见 `artifacts/handoff/regression-m1-held-verification-context.log`；跨代理复核通过。
+- 遮挡第 9 帧另做一次首图显示尺寸对照：保持原文字、历史和第二张诊断图，将第一张无标记图按像素中心放大，原 RGB-D 和严格关联不变。一次 API 回复违反字段协议，未获接受；未把该实验接入生产，也不声称它改善了任务成功：`artifacts/handoff/occluded-09-display-only-online/report.json`。
 - 杯柄精定位现在在同一裁图内最多接收两次语义回答；只有原始完整 RGB-D 解析的真实失败才触发第二次。成功结果缓存，避免重复分割；终止时不回退粗提案。完整原生回归 **658 项通过**，耗时 9.43 s，见 `artifacts/handoff/regression-m1-grounding-transaction.log`。保存帧探针已取得完整物体框并通过深度关联，但接触选点仍偏向较宽的下连接处（高度约 0.81818 m），不代表杯柄中段定位或抓取成功：`artifacts/handoff/mug-11-refinement-transaction-probe/report.json`。
 - 遮挡第 9 次记录的额外一次同图标注探针没有通过严格关联，仍有 41 个背景距离拒绝点；它复现了上一轮 369 点拒绝后才调用一次 API，没有动作、新场景图或阈值变化：`artifacts/handoff/occluded-09-third-online/report.json`。该额外答复只用于诊断，未改变生产修正上限或进展门。
 - 同帧精定位、抬升后补图及新增持物碰撞表面的完整原生回归 **632 项通过**，耗时 9.12 s；包括新侧面后续碰撞、UNKNOWN、非指腹机器人相交及固定参考不漂移。日志：`artifacts/handoff/regression-m1-refinement-transfer.log`。

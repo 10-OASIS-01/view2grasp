@@ -21,20 +21,21 @@ def run_transfer_fixture(tmp_path, monkeypatch, *, outcome='recover', reserve=2)
     candidate = GraspCandidate(np.zeros(3), np.eye(3), .02, np.array([0., 0., 1.]),
         0., 0., surface_point=target[0], grasp_center=target[0])
     evidence = SimpleNamespace(events=[], observations=[], associations=[], associated_clouds={}, retired=[], targets=[],
-        random_draws=[], plans=[], advice=[], sources=[], clock=0., steps=0)
+        random_draws=[], plans=[], advice=[], sources=[], held_requests=[], camera_moves=[], clock=0., steps=0)
     monkeypatch.setattr(runner.time, 'monotonic', lambda: evidence.clock)
 
     class Sim:
         def __init__(self, *args):
             self.q = np.zeros(7); self.gripper_q = np.array([.02, -.02])
             self.robot_xml = ''; self.joint_names = []; self.eef_name = ''
-            self.phase = 'observe'; self.frame = 0
+            self.phase = 'observe'; self.frame = 0; self.view = obs.view
             evidence.sim = self
         def observe(self):
             self.frame += 1
             evidence.observations.append((self.frame, self.phase, evidence.steps))
-            return replace(obs, frame_id=self.frame, q=self.q.copy(), gripper_q=self.gripper_q.copy())
-        def move_camera(self, *args): pass
+            return replace(obs, frame_id=self.frame, q=self.q.copy(), gripper_q=self.gripper_q.copy(), view=self.view)
+        def move_camera(self, *args):
+            evidence.camera_moves.append((self.frame, tuple(args), evidence.steps)); self.view = tuple(args)
         def validate_initial_proxies(self, *args): pass
         def step(self, q, grip): self.q = np.asarray(q).copy(); evidence.steps += 1
         def close(self): pass
@@ -90,7 +91,7 @@ def run_transfer_fixture(tmp_path, monkeypatch, *, outcome='recover', reserve=2)
             evidence.plans.append((evidence.sim.frame, self.attached.copy(), self.gripper.copy()))
             self.checks += 1
             if outcome == 'exception': raise RuntimeError('transfer test exception')
-            if len(evidence.plans) == 1 and outcome != 'lower_failure' or outcome == 'residual':
+            if len(evidence.plans) == 1 and outcome not in ('lower_failure', 'held_recover_success') or outcome == 'residual':
                 self.last_failure = 'observed obstacle' if outcome == 'occupied' else 'RRT timeout'
                 self.closest_by_failure = {'unknown space': {'points': [[.7, .8, 1.2]], 'unknown': 1}}
                 return None
@@ -102,6 +103,13 @@ def run_transfer_fixture(tmp_path, monkeypatch, *, outcome='recover', reserve=2)
         def decide(self, sample, instruction, history, **kwargs):
             self.calls += 1
             result = annotations(sample, mask, part_mask)
+            if history and 'held_verification' in history[-1]:
+                evidence.held_requests.append((sample.frame_id, history[-1], kwargs))
+                result = result.model_copy(update={'azimuth': 90.})
+                if outcome == 'held_abort': result = result.model_copy(update={'action': 'abort'})
+                if outcome == 'held_stale': result = result.model_copy(update={'frame_id': 8})
+                if outcome == 'held_repeat': result = result.model_copy(update={'azimuth': sample.view[0]})
+                return result
             if sample.frame_id == 6 and not kwargs.get('force_observe') and outcome != 'pregrasp_overrun':
                 return result.model_copy(update={'action': 'grasp', 'place_point': (.5, .5)})
             if kwargs.get('observe_purpose') != 'annotation' and sample.frame_id >= 9:
@@ -116,8 +124,8 @@ def run_transfer_fixture(tmp_path, monkeypatch, *, outcome='recover', reserve=2)
     resolver.track = lambda *args, **kwargs: pytest.fail('Loose tracking cannot authorize held contacts')
     def associate(sample, annotation, original_object, original_part, identity, *args, source_supported=False):
         evidence.associations.append((sample.frame_id, source_supported, original_object.copy(), original_part.copy()))
-        if (sample.frame_id == 9 and outcome == 'held_failure'
-                or sample.frame_id == 10 and outcome == 'recovery_failure'):
+        if (sample.frame_id == 9 and outcome.startswith('held_')
+                or sample.frame_id == 10 and outcome in ('recovery_failure', 'held_failure')):
             raise ValueError('unverified held surface')
         # Held views reveal new sides, not merely subsets of the original
         # cloud. They must enter collision checks without moving fixed anchors
@@ -126,6 +134,7 @@ def run_transfer_fixture(tmp_path, monkeypatch, *, outcome='recover', reserve=2)
         if sample.frame_id >= 9:
             delta = [0., 0., -.014] if sample.frame_id == 9 else [0., .020, 0.]
             current_object = np.vstack([current_object, current_object[0] + delta])
+        if outcome == 'low_lift':current_object = current_object - [0., 0., .13]
         current_part = original_part[::2] if sample.frame_id == 10 else original_part
         evidence.associated_clouds[sample.frame_id] = (current_object.copy(), current_part.copy())
         return SimpleNamespace(object_points=current_object.copy(), part_points=current_part.copy(),
@@ -195,7 +204,7 @@ def test_reserved_real_held_then_unknown_view_strictly_gates_same_search_retry(t
 
 
 @pytest.mark.parametrize('outcome,frames,attempts',[
-    ('held_failure', 9, 0), ('recovery_failure', 10, 1), ('occupied', 9, 1), ('residual', 10, 2),
+    ('held_failure', 10, 0), ('recovery_failure', 10, 1), ('occupied', 9, 1), ('residual', 10, 2),
     ('exception', 9, 1), ('pregrasp_overrun', 6, 0),
 ])
 def test_no_motion_or_budget_overrun_when_evidence_or_planning_fails(tmp_path, monkeypatch, outcome, frames, attempts):
@@ -207,6 +216,11 @@ def test_no_motion_or_budget_overrun_when_evidence_or_planning_fails(tmp_path, m
     if outcome == 'recovery_failure':
         assert not any(frame == 10 for frame, _ in e.retired)
         assert not any(frame == 10 for frame, _ in e.targets)
+    if outcome == 'held_failure':
+        assert executed(e, 'lower')
+        assert not any(frame >= 9 for frame, _ in e.retired)
+        assert not any(frame >= 9 for frame, _ in e.targets)
+        assert e.planner.observed_payload_local is None
     if outcome == 'exception':
         report = json.loads((e.out / 'transfer_planning_diagnostic_000.json').read_text())
         assert report['failure'] == 'transfer test exception' and report['elapsed_seconds'] == 7.
@@ -225,3 +239,51 @@ def test_lower_failure_restores_support_flag_and_counts_failed_planning(tmp_path
     assert executed(e, 'transfer') and not executed(e, 'lower')
     assert not e.planner.allow_payload_support
     assert e.result['planning_seconds'] == 10.
+
+
+@pytest.mark.parametrize('outcome,transfer_passes', [('held_recover_success', True), ('held_recover_unknown', False)])
+def test_failed_held_annotation_can_use_last_real_view_but_no_transfer_observation(tmp_path, monkeypatch, outcome, transfer_passes):
+    e = run_transfer_fixture(tmp_path, monkeypatch, outcome=outcome)
+    assert e.result['observations'] == 10
+    assert [(frame, supported) for frame, supported, _, _ in e.associations] == [(7, True), (8, True), (9, False), (10, False)]
+    assert np.array_equal(e.associations[2][2], e.associations[3][2])
+    assert np.array_equal(e.associations[2][3], e.associations[3][3])
+    assert e.observations[8][2] == e.observations[9][2]
+    assert e.camera_moves[-1][0:2] == (9, (90., 55., .8))
+    assert [frame for frame, _, _ in e.plans] == [10]
+    assert executed(e, 'transfer') is transfer_passes
+    assert not any(frame == 9 for frame, _ in e.retired)
+    assert not any(frame == 9 for frame, _ in e.targets)
+    assert [p.tolist() for frame, p in e.targets if frame == 10] == [e.associated_clouds[10][1].tolist()]
+    frame, request, kwargs = e.held_requests[0]
+    assert frame == 9 and kwargs['force_observe']
+    assert request['held_verification']['remaining_transfer_mapping_observations_after_this_view'] == 0
+    assert request['coverage_advice']['purpose'] == 'held_object_verification'
+    assert not len(e.advice[-1][1])  # No invented UNKNOWN-path evidence.
+    assert 'required_points' not in e.advice[-1][2]
+    assert np.array_equal(e.advice[-1][2]['semantic_focus'], e.associations[2][2])
+    report = json.loads((e.out / 'transfer_planning_diagnostic_000.json').read_text())
+    assert report['post_lift_observations_used'] == report['post_lift_observations_reserved'] == 2
+    assert not (e.out / 'transfer_planning_diagnostic_001.json').exists()
+    if not transfer_passes: assert e.result['failure'] == 'planning: transfer RRT timeout'
+
+
+@pytest.mark.parametrize('outcome', ['held_abort', 'held_stale', 'held_repeat'])
+def test_bad_held_recovery_view_decision_returns_without_extra_frame_or_transfer(tmp_path, monkeypatch, outcome):
+    e = run_transfer_fixture(tmp_path, monkeypatch, outcome=outcome)
+    assert e.result['observations'] == 9 and not e.plans
+    assert executed(e, 'lower') and not executed(e, 'transfer')
+    assert not any(frame >= 9 for frame, _ in e.retired)
+    assert any(x['kind'] == 'held_verification_recovery_rejected' for x in e.events)
+
+
+def test_successful_association_with_failed_measured_lift_does_not_spend_last_view(tmp_path, monkeypatch):
+    e = run_transfer_fixture(tmp_path, monkeypatch, outcome='low_lift')
+    assert e.result['observations'] == 9 and not e.held_requests and not e.plans
+    assert executed(e, 'lower') and not executed(e, 'transfer')
+
+
+def test_single_reserved_postlift_frame_cannot_trigger_extra_verification_image(tmp_path, monkeypatch):
+    e = run_transfer_fixture(tmp_path, monkeypatch, outcome='held_failure', reserve=1)
+    assert e.result['observations'] == 9 and not e.held_requests and not e.plans
+    assert executed(e, 'lower') and not executed(e, 'transfer')

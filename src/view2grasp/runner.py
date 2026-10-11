@@ -21,7 +21,7 @@ from .grounding import ContactAssociationError,GroundingResolver,track_surface
 from .grasp_semantics import check_vertical_part_midpoint
 from .annotation_diagnostic import build_annotation_diagnostic
 from .placement import tabletop_placement
-from .transfer_recovery import plan_transfer_attempt,tabletop_observation_budget
+from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
 
 
 def leading_shell(points,resolution=.005):
@@ -864,8 +864,60 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 post_lift_observations_used+=1
                 if task=='occluded':
                     held_p,held_R=robot.pose(sim.q)
-                    association=contact_annotation(obs,decision,planner.attached@held_R.T+held_p,
-                        attached_part@held_R.T+held_p,'post-lift object and permitted-part verification')
+                    held_object=planner.attached@held_R.T+held_p
+                    held_part=attached_part@held_R.T+held_p
+                    association=contact_annotation(obs,decision,held_object,held_part,
+                        'post-lift object and permitted-part verification')
+                    if (association is None and strategy!='fixed'
+                            and post_lift_observations_used<phase_budget.postlift_observations
+                            and record.observations<config.max_observations):
+                        # A failed polygon is not proof of grasp loss, nor
+                        # permission to move. Spend the one remaining reserve
+                        # on a different actual camera view of this unchanged
+                        # held-pose hypothesis, without moving the robot.
+                        try:
+                            advice_timer=time.monotonic()
+                            robot.set_q(sim.q,sim.gripper_q)
+                            current_obs=replace(obs,q=sim.q.copy(),gripper_q=sim.gripper_q.copy())
+                            try:
+                                candidates=suggest_views(robot,current_obs,np.empty((0,3)),budget=2,
+                                    focus_points=held_part,semantic_focus=held_object,
+                                    observed_points=map_.surface)
+                            finally:record.planning_seconds+=time.monotonic()-advice_timer
+                            views=[v for v in candidates.get('views',[]) if different_tabletop_view(v,obs.view)]
+                            held_advice={'purpose':'held_object_verification','views':views,
+                                'max_observations_to_acquire':1,'views_are_alternatives':True,
+                                'predicted_semantic_focus':[s for s in candidates.get('predicted_semantic_focus',[])
+                                    if different_tabletop_view(s['view'],obs.view)],
+                                'reference_kind':'fixed_observed_attachment_at_current_robot_pose',
+                                'scope':'Visibility hypotheses only. No UNKNOWN path samples, free-space certificate, new grasp ray, or contact permission.'}
+                            history.append({'coverage_advice':held_advice,'held_verification':{
+                                'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+                                'strict_association_verified':False,'remaining_real_observations':1,
+                                'remaining_transfer_mapping_observations_after_this_view':0},'feedback':
+                                'The robot is stationary after lifting, but this image did not strictly verify the held object and permitted part. Choose ONE DIFFERENT real camera view that makes that same held object and part identifiable. The latest advice is specifically for held-object visibility, not an UNKNOWN corridor or a new grasp. Do not re-ground a grasp or change the original ray. The fixed attachment projection is only a hypothesis. After the new image, explicit object and part annotations must pass all original strict checks and measured lift verification. Using this last reserved view leaves no transfer mapping observation.'})
+                            event('held_verification_view_advice',frame_id=obs.frame_id,**held_advice)
+                            if strategy=='active':
+                                post=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True)
+                                event('held_verification_view_decision',**post.model_dump())
+                                if post.action!='observe' or post.frame_id!=obs.frame_id or post.camera_id!=obs.camera_id:
+                                    raise ValueError('held verification requires a current-frame observe decision')
+                                selected=(post.azimuth,post.elevation,post.distance)
+                            else:selected=None
+                            selected=tabletop_view(strategy,initial_view,rng,selected)
+                            if not different_tabletop_view(selected,obs.view):
+                                raise ValueError('held verification recovery repeated the current view')
+                            sim.move_camera(*selected)
+                            obs=observe(after_close=True);post_lift_observations_used+=1
+                            association=contact_annotation(obs,decision,held_object,held_part,
+                                'post-lift held-object verification from the last reserved new view')
+                            event('held_verification_recovery',frame_id=obs.frame_id,
+                                association_verified=association is not None,
+                                post_lift_observations_used=post_lift_observations_used,
+                                remaining_transfer_observations=phase_budget.postlift_observations-post_lift_observations_used)
+                        except (ValueError,RuntimeError) as exc:
+                            event('held_verification_recovery_rejected',frame_id=obs.frame_id,reason=str(exc))
+                            association=None
                     tracked=None if association is None else association.object_points
                     tracked_part=None if association is None else association.part_points
                 else:

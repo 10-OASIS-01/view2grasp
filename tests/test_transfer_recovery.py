@@ -7,7 +7,13 @@ import pytest
 
 from view2grasp.mapping import FREE, OCCUPIED, UNKNOWN
 from view2grasp.planning import PlanningBudgetExceeded
-from view2grasp.transfer_recovery import plan_transfer_attempt, tabletop_observation_budget
+from view2grasp.transfer_recovery import different_tabletop_view, plan_transfer_attempt, tabletop_observation_budget
+
+
+def test_wrapped_azimuth_does_not_count_as_new_held_verification_view():
+    assert not different_tabletop_view((-180., 55., .8), (180., 55., .8))
+    assert different_tabletop_view((-150., 55., .8), (180., 55., .8))
+    assert different_tabletop_view((180., 30., .8), (180., 55., .8))
 
 
 def test_named_config_explicitly_reserves_postlift_without_changing_default_protocol():
