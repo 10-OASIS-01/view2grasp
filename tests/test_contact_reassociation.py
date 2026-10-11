@@ -76,9 +76,10 @@ def test_missing_or_inconsistent_semantics_do_not_authorize_contact(fault):
         GroundingResolver().reassociate_contact(obs,decision,reference,reference,'target',.95)
 
 
-def test_support_and_robot_returns_are_excluded_even_inside_semantic_masks():
+@pytest.mark.parametrize('robot_distance',[1.,.9])
+def test_support_and_robot_returns_are_excluded_even_inside_semantic_masks(robot_distance):
     obs,xyz,mask,reference=scene();robot_depth=np.full(obs.depth.shape,10.)
-    robot_depth[10,8]=obs.depth[10,8]
+    robot_depth[10,8]=robot_distance
     result=GroundingResolver().reassociate_contact(obs,annotations(obs,mask),reference,reference,'target',.95,robot_depth)
     assert not result.object_mask[10,8] and not result.part_mask[10,8]
     with pytest.raises(ValueError,match='insufficient filtered depth'):

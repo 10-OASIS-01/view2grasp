@@ -103,17 +103,17 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     'No coverage-only view is prescribed for handle grounding. Infer the handle plane from this image and choose the reachable -X-side broadside described in the task.'})
             record.planning_seconds+=time.monotonic()-timer
         pending_decision=None;grounding_repairs={};contact_association_frames=set()
-        def reassociate_contacts(observation,grounded_decision,original_object,original_part,target,target_part):
-            # One annotation request per acquired frame, only before a bounded
-            # recovery replan. This does not move a camera or select a new ray.
+        def contact_annotation(observation,grounded_decision,original_object,original_part,purpose):
+            # One annotation request per acquired frame in bounded recovery or
+            # verification. This does not move a camera or select a new ray.
             if task!='occluded' or observation.frame_id in contact_association_frames:
-                return target,target_part
+                return None
             contact_association_frames.add(observation.frame_id)
             identities={g.target_id for g in grounded_decision.groundings
                         if g.role in ('object','grasp_part','grasp_contact')}
             identity=next(iter(identities)) if identities else 'target'
             history.append({'contact_reassociation':{
-                'purpose':'Annotate newly visible surfaces of the SAME static object and permitted grasp part; keep the stored grasp ray and candidates.',
+                'purpose':purpose+'; annotate the SAME object and originally permitted grasp part, preserving the stored grasp ray and candidates.',
                 'frame_id':observation.frame_id,'camera_id':observation.camera_id,'target_id':identity,
                 'original_grounding_frame':grounded_decision.frame_id,
                 'original_part':grounded_decision.part or (
@@ -129,13 +129,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             except (ValueError,RuntimeError) as exc:
                 event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc))
                 history.append({'feedback':'Contact reassociation rejected; previous contact permission and original grasp ray remain unchanged: '+str(exc)})
-                return target,target_part
-            report={**association.report,'preserved_grounding_frame':grounded_decision.frame_id}
+                return None
+            report={**association.report,'purpose':purpose,'preserved_grounding_frame':grounded_decision.frame_id}
             np.savez_compressed(out/f'contact_association_{observation.frame_id:03d}.npz',
                 object_mask=association.object_mask,part_mask=association.part_mask,
                 object_points=association.object_points,part_points=association.part_points)
             (out/f'contact_association_{observation.frame_id:03d}.json').write_text(json.dumps(report,indent=2))
             event('contact_association',**report)
+            return association
+        def reassociate_contacts(observation,grounded_decision,original_object,original_part,target,target_part):
+            association=contact_annotation(observation,grounded_decision,original_object,original_part,
+                'pre-close contact recovery for the static scene')
+            if association is None:return target,target_part
             # Keep measured points exactly: rounding representatives could
             # discard the newly observed side endpoint needed by the map.
             target=np.unique(np.vstack([target,association.object_points]),axis=0)
@@ -415,7 +420,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # Closing can move the object before lift. A holed mug may use one
             # additional frame; solid-object tasks remain capped at two. The independent evaluator still
             # verifies success if the observation budget is fully consumed.
-            post_index=0
+            post_index=0;post_association=False
             post_limit=config.max_observations
             max_post_views=reserve_after_close
             while record.observations<post_limit and post_index<max_post_views:
@@ -441,7 +446,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         _,robot_unique=np.unique(np.round(robot_unknown/map_.resolution).astype(np.int32),axis=0,return_index=True)
                         robot_unknown=robot_unknown[robot_unique]
                 else:robot_unknown=np.empty((0,3))
-                if post_index and not len(sweep_unknown) and not len(robot_unknown):break
+                if (post_index and not len(sweep_unknown) and not len(robot_unknown)
+                        and (task!='occluded' or post_association)):break
                 current_obs=replace(obs,q=sim.q.copy(),gripper_q=sim.gripper_q.copy())
                 # Whole-arm safety is a hard priority: a high payload point
                 # count must not sacrifice even one unseen wrist sample. Use
@@ -483,7 +489,19 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 history.append({'view':obs.view,'selected_view':selected,
                     'feedback':'completed one post-grasp mapping observation'})
                 obs=observe(after_close=True)
-                current_target=resolver.track(obs,target,robot_depths.get(obs.frame_id),support_z=map_.table_z)
+                removed_sets=[]
+                if task=='occluded':
+                    association=contact_annotation(obs,decision,original_object,original_part,
+                        'post-close object and permitted-part verification before lifting')
+                    post_association=association is not None
+                    if association is not None:
+                        target=np.unique(np.vstack([target,association.object_points]),axis=0)
+                        target_part=np.unique(np.vstack([target_part,association.part_points]),axis=0)
+                        map_.set_target(target_part)
+                        removed_sets=[association.object_points]
+                    current_target=None
+                else:
+                    current_target=resolver.track(obs,target,robot_depths.get(obs.frame_id),support_z=map_.table_z)
                 if current_target is not None and len(current_target)>=20:
                     # Different views expose different surfaces: a median shift
                     # is not object motion. Reassociate the contact neighborhood
@@ -499,12 +517,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     _,target_unique=np.unique(np.round(target/map_.resolution).astype(np.int32),axis=0,return_index=True)
                     target=target[target_unique]
                     map_.set_target(target_part)
-                # Reassociate local target surfaces in recorded depth frames.
-                # Only observed surfaces associated by RGB-D/SAM are removed.
-                removed_sets=[]
-                for prior_obs in map_.views:
-                    seen=resolver.track(prior_obs,target,robot_depths.get(prior_obs.frame_id),support_z=map_.table_z)
-                    if seen is not None:removed_sets.append(seen)
+                # Occluded pick/place retires only the fresh explicit semantic
+                # association. A loose tracker over historical views can merge
+                # a nearby independent object and erase its collision evidence.
+                if task!='occluded':
+                    for prior_obs in map_.views:
+                        seen=resolver.track(prior_obs,target,robot_depths.get(prior_obs.frame_id),support_z=map_.table_z)
+                        if seen is not None:removed_sets.append(seen)
                 if removed_sets:
                     stale=np.vstack(removed_sets)
                     map_.remove_target_endpoints(stale)
@@ -517,8 +536,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 event('postgrasp_residual',rejected_unknown_points=len(preview_unknown),
                     postgrasp_view_index=post_index+1)
                 post_index+=1
+            if task=='occluded' and not post_association:
+                raise RuntimeError('execution: post-close object/part association unverified; lift blocked')
             p,R=robot.pose(sim.q)
             planner.attached=(target-p)@R
+            attached_part=(target_part-p)@R
             np.save(out/'payload_source_points.npy',target)
             np.savez(out/'payload_attachment_pose.npz',position=p,rotation=R)
             map_.set_payload_source(target)
@@ -542,9 +564,17 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             execute(np.array(lift),1,"lift")
             sim.phase="hold"
             for _ in range(45): sim.step(lift[-1],1)
+            tracked_part=None
             if record.observations<config.max_observations:
                 obs=observe(after_close=True)
-                tracked=resolver.track(obs,target+[0,0,.13],robot_depths.get(obs.frame_id),support_z=map_.table_z)
+                if task=='occluded':
+                    held_p,held_R=robot.pose(sim.q)
+                    association=contact_annotation(obs,decision,planner.attached@held_R.T+held_p,
+                        attached_part@held_R.T+held_p,'post-lift object and permitted-part verification')
+                    tracked=None if association is None else association.object_points
+                    tracked_part=None if association is None else association.part_points
+                else:
+                    tracked=resolver.track(obs,target+[0,0,.13],robot_depths.get(obs.frame_id),support_z=map_.table_z)
                 lifted=tracked is not None and float(np.median(tracked[:,2]))>float(np.median(target[:,2]))+.07 and abs(sim.gripper_q[0]-sim.gripper_q[1])>.006
                 event("visual_verification",lifted=bool(lifted))
             else:
@@ -569,10 +599,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # endpoints, then exclude the observed held target from the obstacle map.
             map_.remove_target_endpoints(target)
             if tracked is not None:
-                map_.remove_target_endpoints(tracked);map_.set_target(tracked)
+                map_.remove_target_endpoints(tracked)
+                map_.set_target(tracked_part if task=='occluded' else tracked)
             held_p,held_R=robot.pose(sim.q)
             held_estimate=planner.attached@held_R.T+held_p
-            map_.remove_target_endpoints(held_estimate)
+            # A predicted attachment pose is not observed object membership.
+            # Keep actual occupied neighbors even near the expected held body.
+            if task!='occluded':map_.remove_target_endpoints(held_estimate)
             map_.set_payload_source(held_estimate)
             if task!="occluded": break
             if decision.place_point is None: raise RuntimeError("grounding: missing destination")

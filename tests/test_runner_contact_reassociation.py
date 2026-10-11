@@ -5,20 +5,27 @@ import json
 
 import numpy as np
 import pytest
+from scipy.spatial import cKDTree
 
 from test_contact_reassociation import annotations,scene
 from view2grasp.grounding import GroundingResolver
+from view2grasp.geometry import unproject
 from view2grasp.types import GraspCandidate
 
 
-@pytest.mark.parametrize('annotation_outcome',['accepted','missing_part','api_failure'])
+@pytest.mark.parametrize('annotation_outcome,post_close,post_lift',[
+    ('accepted',False,False),('missing_part',False,False),('api_failure',False,False),
+    ('accepted',True,False),('missing_part',True,False),('api_failure',True,False),('overbroad_neighbor',True,False),
+    ('accepted',True,True),('api_failure',True,True),('overbroad_neighbor',True,True),
+])
 def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
-        tmp_path,monkeypatch,annotation_outcome):
+        tmp_path,monkeypatch,annotation_outcome,post_close,post_lift):
     from view2grasp import runner,recording
     sample,xyz,mask,part_reference=scene()
     original_part=np.zeros_like(mask);original_part[10:14,8:10]=True
     original_object=xyz[mask]
-    evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[])
+    evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[],
+        removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[])
     candidate=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=part_reference[0],grasp_center=part_reference[0])
     original_ray=candidate.approach.copy()
@@ -26,13 +33,18 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     class Sim:
         def __init__(self,*args):
             self.q=np.zeros(7);self.gripper_q=np.array([.04,-.04]);self.frame=0
-            self.robot_xml='';self.joint_names=[];self.eef_name=''
+            self.robot_xml='';self.joint_names=[];self.eef_name='';self.phase='observe'
+            evidence.sim=self
         def observe(self):
             self.frame+=1;evidence.observations.append(self.frame)
-            return replace(sample,frame_id=self.frame)
+            depth=sample.depth.copy()
+            if self.phase=='hold':depth[mask]+=self.q[0]
+            return replace(sample,frame_id=self.frame,depth=depth,q=self.q.copy(),gripper_q=self.gripper_q.copy())
         def move_camera(self,*view):evidence.cameras.append(view)
         def validate_initial_proxies(self,*args):pass
-        def step(self,*args):pytest.fail('this episode must not execute an uncertified grasp')
+        def step(self,q,grip):
+            assert post_close,'this episode must not execute an uncertified grasp'
+            self.q=np.asarray(q).copy();evidence.executed.append(self.phase)
         def close(self):pass
 
     class Robot:
@@ -41,44 +53,71 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         def volumes(self,*args):return ()
         def visual_volumes(self,*args):return ()
         def depth(self,obs):return np.full_like(obs.depth,10.)
-        def pose(self,*args):return np.zeros(3),np.eye(3)
+        def pose(self,q=None):
+            q=evidence.sim.q if q is None else q
+            return np.array([0.,0.,q[0]]),np.eye(3)
         def grasp_center_offset(self):return np.zeros(3)
+        def ik(self,p,R,q):return np.r_[p[2],q[1:]]
+        def set_q(self,*args):pass
         def close(self):pass
 
-    class Map:
+    neighbor=xyz[10:14,12:16].reshape(-1,3)
+    class Map(runner.DepthMap):
         def __init__(self,resolution):
-            self.resolution=resolution;self.surface=np.vstack([original_object,xyz[10:14,12:16].reshape(-1,3)])
+            super().__init__(resolution,workspace_bounds=None)
+            self.surface=np.vstack([original_object,neighbor]);self.tree=cKDTree(self.surface)
             self.table_z=.95;self.views=[]
         def certify_home(self,*args):pass
-        def integrate(self,obs,*args):self.views.append(obs)
+        def certify_robot_state(self,*args):pass
+        def integrate(self,obs,*args):
+            self.views.append(obs)
+            v,u=np.where(mask);measured=unproject(np.c_[u,v],obs.depth[v,u],obs.K,obs.T_wc)
+            evidence.measured_objects.append(measured)
+            self.surface=np.vstack([measured,neighbor]);self.tree=cKDTree(self.surface)
+            self._refresh_non_target()
         def set_table(self,z):self.table_z=z
-        def classify(self,points):return np.zeros(len(points),np.uint8)
-        def set_target(self,points):evidence.targets.append(points.copy())
+        def classify(self,points):return np.full(len(points),int(post_lift and len(self.views)>=3),np.uint8)
+        def set_target(self,points):
+            evidence.targets.append(points.copy());super().set_target(points)
+        def remove_target_endpoints(self,points,**kwargs):
+            evidence.removal_requests.append(points.copy())
+            super().remove_target_endpoints(points,**kwargs)
+            evidence.remaining_obstacles.append(self.surface.copy())
 
     class Plan:
         def __init__(self,robot,map_,rng):
             self.rng=rng;self.calls=0;self.checks=0;self.last_failure='unknown space'
             self.failure_counts={};self.closest_invalid=None;self.closest_by_failure={}
-            self.best_unknown=original_object[:1]
+            self.best_unknown=original_object[:1];self.payload_invalid=None
         def recovery_unknown(self):return original_object[:1]
         def choose(self,q,candidates,**kwargs):
             evidence.candidate_lists.append(candidates)
             self.calls+=1;self.checks+=1
+            if post_close and self.calls==2:return candidates[0],np.array([q,q]),np.array([q,q])
             return None
+        def begin_payload_lift(self):pass
+        def end_payload_lift(self):pass
+        def feasible_ik(self,p,R,q,**kwargs):
+            evidence.lift_checks+=1;self.last_failure='deliberate lift rejection'
+            return np.r_[p[2],q[1:]] if post_lift else None
 
     class Decisions:
         def __init__(self,*args,**kwargs):
             self.calls=0;self.seconds=0.;self.client=SimpleNamespace(close=lambda:None)
         def decide(self,obs,instruction,history,**kwargs):
             self.calls+=1;evidence.vlm_calls.append((obs.frame_id,kwargs,json.loads(json.dumps(history))))
-            assert self.calls<=3,'one annotation call must not create an unbounded repair loop'
+            assert self.calls<=(7 if post_close else 3),'annotation must not create an unbounded repair loop'
             if self.calls==1:
                 return annotations(obs,mask,original_part).model_copy(update={'action':'grasp'})
-            if self.calls==2:
+            if 'contact_reassociation' not in history[-1]:
                 return annotations(obs,mask).model_copy(update={'groundings':[]})
-            if annotation_outcome=='api_failure':raise RuntimeError('VLM service unavailable in mock')
-            result=annotations(obs,mask)
-            if annotation_outcome=='missing_part':result=result.model_copy(update={'groundings':result.groundings[:1]})
+            outcome=('accepted' if (post_close and obs.frame_id==2) or
+                (post_lift and obs.frame_id<4) else annotation_outcome)
+            if outcome=='api_failure':raise RuntimeError('VLM service unavailable in mock')
+            proposed_mask=mask.copy()
+            if outcome=='overbroad_neighbor':proposed_mask[10:14,12:16]=True
+            result=annotations(obs,proposed_mask,original_part if post_close else None)
+            if outcome=='missing_part':result=result.model_copy(update={'groundings':result.groundings[:1]})
             return result
 
     resolver=GroundingResolver()
@@ -100,13 +139,16 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     monkeypatch.setattr(runner,'nominal_grasp',lambda *args:None)
     monkeypatch.setattr(runner,'suggest_views',lambda *args,**kwargs:{'views':[[0.,55.,.8]]})
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
+    monkeypatch.setattr(runner,'time_parameterize',lambda path:path)
     monkeypatch.setattr(recording,'save_grounding_result',lambda *args:None)
     monkeypatch.setattr(runner,'save_episode',lambda out,sim,record,events:evidence.events.extend(events))
     result=runner.run_episode('occluded',3,'active',tmp_path,replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=4,perception_backend='rgbd'))
 
-    assert result['observations']==2 and result['vlm_calls']==3 and result['attempts']==0
-    assert evidence.observations==[1,2] and len(evidence.cameras)==1
+    assert result['observations']==(4 if post_close else 2)
+    assert result['vlm_calls']==(6 if post_lift else 7 if post_close else 3) and result['attempts']==int(post_close)
+    assert evidence.observations==(list(range(1,5)) if post_close else [1,2])
+    assert len(evidence.cameras)==(2 if post_lift else 3 if post_close else 1)
     assert evidence.candidate_lists[0] is evidence.candidate_lists[1]
     assert np.array_equal(candidate.approach,original_ray)
     assert len(evidence.targets[0])==8 # Explicit part was not broadened by the old 4 cm whole-object shortcut.
@@ -117,6 +159,40 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     events=evidence.events
     replans=[e for e in events if e['kind']=='recovery_planning']
     assert len(replans)==1 and replans[0]['preserved_grounding_frame']==1
+    if post_close:
+        # The actual DepthMap removal operation keeps every 10 mm neighbor
+        # endpoint, including when a bad annotation includes that neighbor.
+        assert evidence.removal_requests
+        assert all(np.min(cKDTree(neighbor).query(points)[0])>.009 for points in evidence.removal_requests)
+        assert all(np.max(cKDTree(points).query(neighbor)[0])<1e-9 for points in evidence.remaining_obstacles)
+        assert all(len(points)==8 for points in evidence.targets)
+        if post_lift:
+            assert 'lift' in evidence.executed and evidence.lift_checks==14
+            measured=cKDTree(np.vstack(evidence.measured_objects))
+            # Removal is supported by actually measured object points. The
+            # camera's changed sampling differs from pure FK translation, so
+            # deleting the predicted held cloud would fail this assertion.
+            assert all(np.max(measured.query(points)[0])<1e-9 for points in evidence.removal_requests)
+            if annotation_outcome=='accepted':
+                assert result['failure']=='grounding: missing destination'
+                assert not any(phase in evidence.executed for phase in ('lower','release','transfer'))
+                assert np.min(evidence.targets[-1][:,2])>1.1
+                assert any(e['kind']=='visual_verification' and e['lifted'] for e in events)
+            else:
+                assert result['failure']=='execution: visual lift verification failed'
+                assert 'lower' in evidence.executed and 'release' in evidence.executed
+                assert 'transfer' not in evidence.executed
+                assert any(e['kind']=='contact_association_rejected' and e['frame_id']==4 for e in events)
+            return
+        assert 'close' in evidence.executed and 'lift' not in evidence.executed
+        if annotation_outcome=='accepted':
+            assert evidence.lift_checks==1 and result['failure']=='planning: lift deliberate lift rejection'
+            assert len([e for e in events if e['kind']=='contact_association'])==3
+        else:
+            assert evidence.lift_checks==0
+            assert result['failure']=='execution: post-close object/part association unverified; lift blocked'
+            assert len([e for e in events if e['kind']=='contact_association_rejected'])==2
+        return
     if annotation_outcome=='accepted':
         assert len(evidence.targets)==2 and len(evidence.targets[-1])==16
         assert any(e['kind']=='contact_association' and not e['grasp_ray_changed'] for e in events)

@@ -324,7 +324,10 @@ class GroundingResolver:
         xyz=unproject(np.stack([u,v],-1),obs.depth,obs.K,obs.T_wc)
         valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)&np.isfinite(xyz).all(axis=2)
         valid &= xyz[:,:,2]>support_z+.006
-        if robot_depth is not None:valid &= np.abs(obs.depth-robot_depth)>.003
+        if robot_depth is not None:
+            # Known robot geometry in front of a depth return also invalidates
+            # that return; being farther than the self-match band is not enough.
+            valid &= np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
         clouds={};overlap={}
         for role,reference in (('object',reference_object),('grasp_part',reference_part)):
             reference=np.asarray(reference)
