@@ -405,7 +405,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
                     focus_points=focus_for_advice,observed_points=map_.surface,
                     required_points=required_points if len(required_points) else None)
-                history.append({'coverage_advice':payload_advice,'feedback':
+                history.append({'coverage_advice':payload_advice,
+                    'scene_changed_since_observation':post_index==0,'feedback':
                     'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})
                 event('postgrasp_view_advice',**payload_advice)
                 if strategy == 'active':

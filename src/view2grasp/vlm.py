@@ -119,8 +119,34 @@ Prefer an unvisited view from the latest coverage_advice, even when that view is
 poor for recognizing or grasping the target. Avoid repeating the current view
 when the scene has not moved: another identical image adds no coverage. Explain
 which advised view you choose or why a different unvisited view is needed.
+mapping_context exposes the latest advice and which advised views have not
+been acquired in that recovery transaction. Prefer its remaining views over
+remembering the list from older history. These are predicted viewpoints, not
+observed free space; every motion still needs geometric validation.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
+
+
+def _mapping_context(obs,history):
+    # A fresh advice transaction can follow a changed robot/payload pose. Do not
+    # remove views merely because the same camera was used before that advice.
+    index=next((i for i in range(len(history)-1,-1,-1)
+                if isinstance(history[i],dict) and 'coverage_advice' in history[i]),None)
+    advice=None if index is None else history[index]['coverage_advice']
+    recent=[] if index is None else history[index+1:]
+    stale_image=index is not None and history[index].get('scene_changed_since_observation',False)
+    views=[] if stale_image else [list(map(float,obs.view))]
+    views.extend(list(map(float,item['view'])) for item in recent
+                 if isinstance(item,dict) and 'view' in item)
+    def key(view):
+        azimuth,elevation,distance=map(float,view)
+        return (round(azimuth%360,3)%360,round(elevation,3),round(distance,4))
+    seen={key(view) for view in views}
+    offered=advice.get('views',[]) if isinstance(advice,dict) else []
+    return {'purpose':'mapping_only','latest_coverage_advice':advice,
+            'scene_changed_since_observation':stale_image,
+            'views_in_current_transaction':views,
+            'unvisited_advised_views':[view for view in offered if key(view) not in seen]}
 
 
 class VLM:
@@ -138,6 +164,8 @@ class VLM:
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
         user['allowed_actions']=['observe','grasp','abort'] if obs.base_pose is None else ['observe','navigate','grasp','place','finish','abort']
+        if force_observe and obs.base_pose is None:
+            user['mapping_context']=_mapping_context(obs,history)
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
             {"type":"text","text":json.dumps(user)},
             {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]

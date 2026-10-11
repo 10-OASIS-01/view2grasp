@@ -79,6 +79,39 @@ def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
     finally:client.client.close()
     assert client.calls==1 and decision.observation_camera=='robot0_eye_in_hand'
 
+
+def test_mapping_context_tracks_only_views_after_latest_advice():
+    from dataclasses import replace
+    from view2grasp.vlm import _mapping_context
+    advice={'views':[[-180,-10,1.3],[90,-10,1.3],[150,30,1.3]]}
+    history=[{'view':[150,30,1.3]}, {'coverage_advice':advice},
+             {'view':[180,-10,1.3]}]
+    context=_mapping_context(replace(observation(),view=(90,-10,1.3)),history)
+    assert context['unvisited_advised_views']==[[150,30,1.3]]
+    assert context['latest_coverage_advice']==advice
+    assert history[-1]['view']==[180,-10,1.3]
+
+
+@pytest.mark.parametrize('latest',[None,{'views':[]}])
+def test_mapping_context_does_not_resurrect_stale_advice(latest):
+    from view2grasp.vlm import _mapping_context
+    context=_mapping_context(observation(),[
+        {'coverage_advice':{'views':[[90,-10,1.3]]}}, {'coverage_advice':latest}])
+    assert context['latest_coverage_advice']==latest
+    assert context['unvisited_advised_views']==[]
+
+
+def test_post_close_advice_can_reacquire_the_previous_camera_view():
+    from dataclasses import replace
+    from view2grasp.vlm import _mapping_context
+    view=[90,-10,1.3]
+    obs=replace(observation(),view=tuple(view))
+    context=_mapping_context(obs,[{'coverage_advice':{'views':[view]},
+                                  'scene_changed_since_observation':True}])
+    assert context['scene_changed_since_observation'] is True
+    assert context['views_in_current_transaction']==[]
+    assert context['unvisited_advised_views']==[view]
+
 def test_timeout_is_bounded_and_logged(tmp_path):
     client=VLM(tmp_path);client.client.close()
     def timeout(request):raise httpx.ReadTimeout('deliberate test timeout',request=request)
