@@ -1,5 +1,6 @@
 """Same acquired crop refines a new grasp; it is never an observe annotation."""
 import base64
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -58,6 +59,12 @@ def test_refinement_logs_exact_crop_and_demands_fresh_grasp_before_ray(tmp_path)
     assert refinement['acquires_new_observation'] is False
     assert refinement['derived_image_context']==evidence
     assert 'both ends of the visible straight bar' in refinement['instructions']
+    assert 'prefer ONE tight object BOX' in refinement['instructions']
+    assert 'mug body AND handle together' in refinement['instructions']
+    assert 'SEPARATE tight visible grasp_part region inside the object region' in refinement['instructions']
+    assert 'any polygon hole must lie inside its outer boundary' in refinement['instructions']
+    # The preference does not rewrite the model's polygon into a synthesized box.
+    assert answer.groundings[0].kind=='polygon'
     assert 'not the original full image' in context['response_contract']
     assert 'Do not return observe' in context['response_contract']
     image_path=logged['messages'][1]['content'][1]['image_url']['url']
@@ -125,6 +132,73 @@ def test_refinement_scope_and_provenance_are_checked_before_any_request(tmp_path
         key,value={'source_frame':('source_frame_id',99),'source_camera':('source_camera_id','other'),
             'shape':('crop_shape_hw',[128,128]),'new_observation':('new_observation',True)}[fault]
         kwargs['grounding_refinement'][key]=value;kwargs['derived_image_context'][key]=value
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError):client.decide(obs,'Grasp the handle',[],**kwargs)
+    finally:client.client.close()
+    assert client.calls==0 and not list(tmp_path.iterdir())
+
+
+def geometry_feedback(obs):
+    return {'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+        'coordinate_space':'supplied_crop_normalized_pixel_centers',
+        'image_shape_hw':list(obs.depth.shape),'repair_attempt':1,'max_geometry_repairs':1,
+        'previous_crop_decision':grasp(obs),
+        'geometry_diagnostics':{'reason':'contact seed outside object mask',
+            'rejected_seeds':[{'pixel':[23,9],'normalized':[23/31,9/31],
+                'reasons':['outside_object_region']}],'valid_candidate_pixels':17}}
+
+
+def test_one_geometry_feedback_reuses_exact_crop_and_preserves_raw_reply_and_rejection(tmp_path):
+    obs=observation();evidence=provenance(obs);feedback=geometry_feedback(obs)
+    original=copy.deepcopy(feedback);requests=[];reply=grasp(obs)
+    # A fresh box is a model choice. The client does not synthesize or union it.
+    reply['groundings'][0].update(kind='box',box=[.1,.1,.9,.9],points=[])
+    client=client_with_replies(tmp_path,[grasp(obs),reply],requests)
+    try:
+        client.decide(obs,'Grasp the handle',[],force_grasp=True,
+            grounding_refinement=evidence,derived_image_context=evidence)
+        answer=client.decide(obs,'Grasp the handle',[],force_grasp=True,
+            grounding_refinement=evidence,derived_image_context=evidence,
+            grounding_refinement_feedback=feedback)
+    finally:client.client.close()
+    assert feedback==original and answer.groundings[0].box==(.1,.1,.9,.9)
+    logs=[json.loads((tmp_path/f'call_{i:03d}.json').read_text())['request'] for i in range(2)]
+    assert 'grounding_refinement_feedback' not in logs[0]['context']
+    assert logs[1]['context']['grounding_refinement_feedback']==original
+    instructions=logs[1]['context']['grounding_refinement_context']['instructions']
+    assert 'ONE geometry correction in the SAME supplied crop' in instructions
+    assert 'not correct semantic labels or suggested replacement contact points' in instructions
+    assert 'Do not mechanically union, expand or clip regions' in instructions
+    assert logs[0]['image_sha256']==logs[1]['image_sha256']
+    assert requests[0]['messages'][1]['content'][1]==requests[1]['messages'][1]['content'][1]
+    assert client.calls==2 and len(list(tmp_path.glob('input_frame_*.png')))==1
+
+
+@pytest.mark.parametrize('fault',['missing_refinement','wrong_type','frame','camera','space','shape',
+    'attempt','attempt_bool','limit','diagnostics','previous_missing','previous_action',
+    'previous_frame','previous_camera','previous_grounding_frame','previous_grounding_source'])
+def test_geometry_feedback_rejects_stale_or_out_of_scope_transaction_before_request(tmp_path,fault):
+    obs=observation();evidence=provenance(obs);feedback=geometry_feedback(obs)
+    kwargs={'force_grasp':True,'grounding_refinement':evidence,'derived_image_context':evidence,
+        'grounding_refinement_feedback':feedback}
+    if fault=='missing_refinement':
+        kwargs.pop('grounding_refinement');kwargs.pop('derived_image_context')
+    elif fault=='wrong_type':kwargs['grounding_refinement_feedback']='retry'
+    elif fault=='previous_missing':feedback.pop('previous_crop_decision')
+    elif fault.startswith('previous_grounding_'):
+        key,value=('frame_id',99) if fault.endswith('frame') else ('source','rgbd')
+        feedback['previous_crop_decision']['groundings'][0][key]=value
+    elif fault.startswith('previous_'):
+        key,value={'previous_action':('action','observe'),'previous_frame':('frame_id',99),
+            'previous_camera':('camera_id','other')}[fault]
+        feedback['previous_crop_decision'][key]=value
+    else:
+        key,value={'frame':('frame_id',99),'camera':('camera_id','other'),
+            'space':('coordinate_space','full_image'),'shape':('image_shape_hw',[128,128]),
+            'attempt':('repair_attempt',2),'attempt_bool':('repair_attempt',True),
+            'limit':('max_geometry_repairs',2),'diagnostics':('geometry_diagnostics','guess')}[fault]
+        feedback[key]=value
     client=VLM(tmp_path)
     try:
         with pytest.raises(ValueError):client.decide(obs,'Grasp the handle',[],**kwargs)

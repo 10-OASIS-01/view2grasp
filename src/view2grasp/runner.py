@@ -15,7 +15,8 @@ from .config import ExperimentConfig,fingerprint
 from .view_advisor import nominal_grasp,swept_unknown,suggest_views
 from .reachability_advisor import suggest_reachable_views
 from .observation_policy import tabletop_view
-from .observation_crop import crop_observation,crop_grasp_proposal
+from .observation_crop import crop_observation
+from .grounding_refinement import refine_grasp_grounding
 from .grounding import ContactAssociationError,GroundingResolver,track_surface
 from .grasp_semantics import check_vertical_part_midpoint
 from .annotation_diagnostic import build_annotation_diagnostic
@@ -281,6 +282,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             decision=pending_decision or vlm.decide(obs,INSTRUCTIONS[task],history,
                 force_grasp=record.observations>=force_at or strategy!="active")
             pending_decision=None
+            refinement_resolved=None
             save_observation(out/"observations",obs,decision)
             event("decision",**decision.model_dump())
             if (task=='mug' and config.refine_grasp_grounding and decision.action=='grasp'
@@ -290,17 +292,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 grasp_refinement_frames.add(obs.frame_id)
                 coarse=decision
                 try:
-                    crop=crop_grasp_proposal(obs,coarse,robot_depth=robot_depths.get(obs.frame_id))
-                    image_context=crop.provenance()
-                    event('grounding_refinement_request',frame_id=obs.frame_id,
-                        coarse_decision=coarse.model_dump(),image_context=image_context,
-                        observations_used=record.observations)
-                    refined=vlm.decide(crop.observation,INSTRUCTIONS[task],history,
-                        force_grasp=True,grounding_refinement=image_context,derived_image_context=image_context)
-                    decision=crop.restore_grasp_decision(refined)
-                    event('grounding_refinement_decision',frame_id=obs.frame_id,
-                        crop_decision=refined.model_dump(),restored_decision=decision.model_dump(),
-                        image_context=image_context)
+                    decision,refinement_resolved=refine_grasp_grounding(obs,coarse,resolver,vlm,
+                        INSTRUCTIONS[task],history,map_.table_z,robot_depth=robot_depths.get(obs.frame_id),
+                        event=lambda kind,**data:event(kind,observations_used=record.observations,**data))
                     save_observation(out/'observations',obs,decision)
                 except (ValueError,RuntimeError) as exc:
                     record.failure='grounding refinement: '+str(exc)
@@ -323,7 +317,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     "feedback":"requested new observation"}); obs=observe(); continue
             timer=time.monotonic();candidate_search_completed=False;checks_before=planner.checks
             try:
-                resolved=resolver.resolve_grasp(obs,decision,map_.table_z,robot_depths.get(obs.frame_id))
+                resolved=(refinement_resolved if refinement_resolved is not None else
+                    resolver.resolve_grasp(obs,decision,map_.table_z,robot_depths.get(obs.frame_id)))
                 decision=resolved.decision
                 record.grounding_types.extend(resolved.report['kinds'])
                 record.segmentation_calls=resolver.calls;record.perception_seconds=resolver.seconds

@@ -44,7 +44,7 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 ## 本轮记录索引
 
-下表保留全部 28 次已完成的本机针对性开发运行，包括成功前后的失败，均为 seed 3。各行源码/配置可能不同，不能合并计算性能指标。
+下表保留全部 29 次已完成的本机针对性开发运行，包括成功前后的失败，均为 seed 3。各行源码/配置可能不同，不能合并计算性能指标。
 
 | 本机记录前缀 | 结果与诊断 |
 | --- | --- |
@@ -72,6 +72,7 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 | `handoff-occluded-06` | `86afd0c`；6 次观测、24 次调用、0 次抓取，无记录碰撞；第 3、4 帧通过关联，最终抓取前规划预算用尽，仍有 UNKNOWN 和接近障碍；完整成功为 false |
 | `handoff-occluded-07` | `77c776d`；8 次观测、30 次调用、1 次抓取，无记录碰撞；第 8 帧严格关联通过，抬升仍遭旧侧面端点阻挡，未搬运或放置，完整成功为 false |
 | `handoff-occluded-08` | `951353f`；1024 RGB-D、8 次观测、20 次调用、1 次抓取，无记录碰撞；第 4、5、7、8 帧严格关联通过，已实际抬升并保持，首次抓取评分为 true；搬运 RRT 超时，未放置，完整成功仍为 false |
+| `handoff-occluded-09` | `c4231fc`；十帧上限、实际 9 次观测、28 次调用、1 次抓取，无记录碰撞；抬升与保持通过独立首次抓取评分；第 9 帧持物标注偏入背景，两轮均被严格关联拒绝，随后返回原高度释放，未进入搬运；第 10 帧未消耗 |
 | `handoff-navigation-01` | 未移动；当前相机与待切换相机混淆，模型回复未通过校验 |
 | `handoff-navigation-02` | 协议通过，16 次高层观测、192 次安全观测，累计行驶约 0.8525 m，无记录碰撞；未到达，官方成功为 false |
 | `handoff-navigation-03` | 12 次高层观测、176 次安全观测，行驶约 0.9592 m，无记录碰撞；模型提出 finish，但独立成功判据未通过 |
@@ -133,10 +134,14 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 `handoff-occluded-08` 的 255 个状态已实际回放，蓝块保持阶段最低抬升约 0.12958 m，连续双指抓持约 2.2 s；这仍只是首次抓取成功，不是放置成功。后续搬运的保存图重建发现关节直线与等高 TCP 分段路径均在肩部遇到 UNKNOWN，首个拒绝只有一个机器人点，未发现该处已观测障碍或持物拒绝。更换路径或只刷新当前机器人体积未解决缺失的观察证据。报告：`artifacts/handoff/occluded-08-replay-report.json`、`artifacts/handoff/occluded-08-transfer-audit/report.json`。两次新增 episode 的全部 35 个 Python 源文件均匹配 `951353f`。
 
+`handoff-occluded-09` 实际使用了抬升后预留帧，但尚未验证搬运恢复分支。第 9 帧第二次标注仍包含 369 个距原参考约 3.5–3.6 m 的背景返回点；严格拒绝正确，不能将其解释为 35 mm 关联边界太紧。完整成功为 false，独立首次抓取为 true。全部 326 个保存状态已实际回放（20 fps、16.3 s），证实抬升、保持、返回原高度和释放，见 `artifacts/handoff/occluded-09-replay-report.json`。36 个 Python 源文件均匹配 `c4231fc`，见 `artifacts/handoff/occluded-09-source-provenance.json`。本轮 VLM 目标落点也与第 8 次不同，不是单一配置变量的对照实验。
+
 新增 `occluded-transfer.yaml` 明确分配十帧为抓前六帧、闭爪后两帧、抬升后两帧，后两个额度不会被提前消耗。抬升后先真实采图并严格关联；若搬运仍因实际 UNKNOWN 拒绝，可用最后一帧针对残余补图、再次关联并恢复相同随机搜索状态重试。新看到的持物侧面先加入独立的载荷碰撞点云，再退休当前实测端点；原始语义参考、指腹接触许可及放置参考不变。额外碰撞点仍接受全部机器人、UNKNOWN 和已观测障碍检查，源表面证据不能豁免 OCCUPIED。首帧 held 关联失败仍阻止搬运，不能用独立评估真值代替。
 
 ## 工程与环境验证
 
+- 杯柄精定位现在在同一裁图内最多接收两次语义回答；只有原始完整 RGB-D 解析的真实失败才触发第二次。成功结果缓存，避免重复分割；终止时不回退粗提案。完整原生回归 **658 项通过**，耗时 9.43 s，见 `artifacts/handoff/regression-m1-grounding-transaction.log`。保存帧探针已取得完整物体框并通过深度关联，但接触选点仍偏向较宽的下连接处（高度约 0.81818 m），不代表杯柄中段定位或抓取成功：`artifacts/handoff/mug-11-refinement-transaction-probe/report.json`。
+- 遮挡第 9 次记录的额外一次同图标注探针没有通过严格关联，仍有 41 个背景距离拒绝点；它复现了上一轮 369 点拒绝后才调用一次 API，没有动作、新场景图或阈值变化：`artifacts/handoff/occluded-09-third-online/report.json`。该额外答复只用于诊断，未改变生产修正上限或进展门。
 - 同帧精定位、抬升后补图及新增持物碰撞表面的完整原生回归 **632 项通过**，耗时 9.12 s；包括新侧面后续碰撞、UNKNOWN、非指腹机器人相交及固定参考不漂移。日志：`artifacts/handoff/regression-m1-refinement-transfer.log`。
 - 提前重选、可达性上下文和十帧杯柄配置的完整原生回归 **561 项通过**，耗时 8.15 s；测试包含两类显式重选上限、正确来源证据和三帧闭爪后预留。日志：`artifacts/handoff/regression-m1-early-reselection.log`。
 - 本次关联与重定位修复完整原生回归 **546 项通过**，耗时 8.22 s，包含支撑关联、新事务边界、图像坐标一致性和严格邻物反例。日志：`artifacts/handoff/regression-m1-supported-surfaces.log`。

@@ -231,7 +231,7 @@ class VLM:
 
     def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
                observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None,
-               current_frame_reselection=None,grounding_refinement=None):
+               current_frame_reselection=None,grounding_refinement=None,grounding_refinement_feedback=None):
         if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
             raise ValueError('unsupported observation purpose')
         if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
@@ -251,6 +251,21 @@ class VLM:
                     or tuple(obs.rgb.shape[:2])!=tuple(obs.depth.shape)
                     or grounding_refinement.get('new_observation') is not False):
                 raise ValueError('grounding refinement requires matching current source frame, camera, image shape and derived crop provenance')
+        if grounding_refinement_feedback is not None:
+            feedback=grounding_refinement_feedback
+            if (grounding_refinement is None or not isinstance(feedback,dict)
+                    or feedback.get('frame_id')!=obs.frame_id or feedback.get('camera_id')!=obs.camera_id
+                    or feedback.get('coordinate_space')!='supplied_crop_normalized_pixel_centers'
+                    or feedback.get('image_shape_hw')!=list(obs.depth.shape)
+                    or type(feedback.get('repair_attempt')) is not int or feedback['repair_attempt']!=1
+                    or type(feedback.get('max_geometry_repairs')) is not int or feedback['max_geometry_repairs']!=1
+                    or not isinstance(feedback.get('geometry_diagnostics'),dict)):
+                raise ValueError('grounding refinement feedback requires one geometry repair in the current crop coordinate space')
+            previous=AgentDecision.model_validate(feedback.get('previous_crop_decision'))
+            if (previous.action!='grasp' or previous.frame_id!=obs.frame_id or previous.camera_id!=obs.camera_id
+                    or any(g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id or g.source!='vlm'
+                        for g in previous.groundings)):
+                raise ValueError('grounding refinement feedback requires the previous same-frame crop grasp')
         if derived_image_context is not None and observe_purpose!='annotation' and grounding_refinement is None:
             raise ValueError('derived images are supported only for current-frame annotation or grounding refinement')
         if annotation_diagnostic is not None:
@@ -294,7 +309,12 @@ class VLM:
                 'instructions':'This crop contains pixels from the CURRENT already-acquired image. '
                     'No grasp ray has been accepted from the earlier coarse proposal. Reinspect this crop and return '
                     'a fresh grasp with explicit object AND grasp_part box, polygon or mask regions, or abort if uncertain. '
-                    'The object must cover the visible complete object material, including the mug body and handle; '
+                    'For a mug, prefer ONE tight object BOX around the complete visible mug body AND handle together. '
+                    'The object region must include the chosen handle material, not only the cup body; '
+                    'do not copy the small grasp_part region as the object. A box needs no aperture hole. '
+                    'Use a polygon or mask only when you can trace its complete visible extent reliably; '
+                    'any polygon hole must lie inside its outer boundary and must not remove the chosen handle material. '
+                    'Provide a SEPARATE tight visible grasp_part region inside the object region: '
                     'the permitted grasp_part must isolate the straight outer vertical handle bar around its midpoint, '
                     'excluding both junctions. Inspect both ends of the visible straight bar before choosing its middle; '
                     'do not copy an upper-only patch or earlier pixel coordinates. Prefer regions without an optional contact click. '
@@ -304,6 +324,16 @@ class VLM:
                     'depth, grounding, ray, IK and collision checks. Cropping grants no visibility, contact or safety evidence. '
                     'Ignore older mapping-only preserve-ray instructions: this is before-ray semantic refinement, '
                     'not an observe annotation and not a request for another image.'}
+            if grounding_refinement_feedback is not None:
+                user['grounding_refinement_feedback']=copy.deepcopy(grounding_refinement_feedback)
+                user['grounding_refinement_context']['instructions']+=(' The previous crop reply failed the actual '
+                    'RGB-D grounding resolver. This is its ONE geometry correction in the SAME supplied crop. '
+                    'The feedback and previous_crop_decision use this crop coordinate space. Reinspect the image and '
+                    'return fresh complete object and separate part regions, or abort. Check that the whole-object '
+                    'region includes the chosen visible handle material. Geometry diagnostics identify rejected pixels '
+                    'or constraints, not correct semantic labels or suggested replacement contact points. '
+                    'Do not mechanically union, expand or clip regions, or move a contact to a diagnostic pixel; '
+                    'correct the visual annotation only when the current image supports it. All ordinary checks still apply.')
         if current_frame_reselection is not None:
             user['current_frame_reselection_context']={
                 'purpose':'fresh_grounding_on_acquired_frame','frame_id':obs.frame_id,

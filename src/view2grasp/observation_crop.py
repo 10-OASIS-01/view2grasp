@@ -5,6 +5,7 @@ object is visible, still present, reachable, or safe to touch in this frame.
 """
 from dataclasses import dataclass, replace
 from itertools import product
+import copy
 
 import numpy as np
 
@@ -87,6 +88,27 @@ class ObservationCrop:
             if not {'object','grasp_part'}<=roles:
                 raise ValueError('grasp refinement requires fresh explicit object and grasp_part')
         return self._restore_decision(decision)
+
+    def localize_grounding_error(self,error):
+        """Express actual resolver seed failures in the supplied crop coordinates.
+
+        The source diagnostic is retained by the caller's local log. No sample
+        is clipped to the crop, moved to valid depth, or made into a new seed.
+        """
+        diagnostics=getattr(error,'diagnostics',None)
+        if diagnostics is None:return {'reason':str(error)}
+        obs=self.observation
+        if (diagnostics.get('frame_id')!=obs.frame_id or diagnostics.get('camera_id')!=obs.camera_id
+                or 'rejected_seeds' not in diagnostics):
+            raise ValueError('grounding feedback requires current source-frame seed diagnostics')
+        feedback=copy.deepcopy(diagnostics)
+        ch,cw=obs.depth.shape;offset=np.array(self.bounds_xyxy[:2])
+        feedback.update(coordinate_space='supplied_crop_normalized_pixel_centers',image_shape_hw=[ch,cw])
+        for sample in feedback['rejected_seeds']:
+            local=np.asarray(sample['pixel'],dtype=int)-offset
+            sample['pixel']=local.tolist();sample['normalized']=(local/[cw-1,ch-1]).tolist()
+            sample['inside_crop']=bool(np.all(local>=0) and np.all(local<[cw,ch]))
+        return feedback
 
     def _restore_decision(self, decision):
         obs = self.observation
