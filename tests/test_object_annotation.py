@@ -237,3 +237,55 @@ def test_actual_saved_partial_reply_replayed_twice_remains_bounded_and_unedited(
     assert [sample['pixel'] for sample in feedback['rejected_samples']] == [[70, 72], [57, 72]]
     assert len(result.ownership.report['abstentions']) == 2
     assert result.report['reply_results_merged'] is False
+
+
+def test_unseeded_component_gets_one_review_without_automatic_ownership():
+    obs, reference, _ = source_scene(two_parts=True)
+    client = FakeVLM(['good', 'good'])
+    result = annotate(client, obs, reference, allow_partial_seed_components=True)
+    assert len(result.attempts) == 2
+    assert len(result.ownership.object_points) == 196
+    assert not result.ownership.object_mask[210:224, 254:268].any()
+    # A valid but incomplete first answer is not silently broadened. The model
+    # can ignore the review, and the same surfaces remain unowned afterward.
+    assert np.array_equal(result.attempts[0].ownership.object_mask, result.ownership.object_mask)
+    feedback = client.requests[1]['history'][0]['source_object_annotation']['geometry_diagnostics']
+    assert feedback['failures'] == feedback['rejected_samples'] == []
+    assert feedback['unresolved_measured_component_count'] == 1
+    component = feedback['unresolved_measured_components'][0]
+    x0, y0, _, _ = result.report['image_context']['bounds_xyxy']
+    expected = np.array([254-x0, 210-y0, 267-x0, 223-y0])
+    assert component['bbox_pixel_xyxy'] == expected.tolist()
+    h, w = client.requests[1]['obs'].depth.shape
+    assert component['bbox_normalized_xyxy'] == pytest.approx(expected / [w-1, h-1, w-1, h-1])
+    assert 'unresolved' in component['semantic_status']
+    assert client.requests[1]['kwargs']['annotation_diagnostic'].rejected_pixels == ()
+    assert 'reference overlap' in client.requests[1]['instruction']
+    assert result.report['vlm_calls'] == 2 and result.report['new_observations'] == 0
+
+
+def test_unresolved_review_abort_does_not_fall_back_to_successful_first_answer():
+    obs, reference, _ = source_scene(two_parts=True)
+    client = FakeVLM(['good', 'abort'])
+    result = annotate(client, obs, reference, allow_partial_seed_components=True)
+    assert result.attempts[0].ownership is not None
+    assert len(result.attempts) == 2 and result.ownership is None
+
+
+def test_review_accepts_second_component_only_after_new_explicit_semantic_seed():
+    obs, reference, _ = source_scene(two_parts=True)
+
+    class ConfirmBoth(FakeVLM):
+        def decide(self, obs, instruction, history, **kwargs):
+            decision = super().decide(obs, instruction, history, **kwargs)
+            if len(self.requests) == 2:
+                yy, xx = np.where(obs.depth == 1.)
+                h, w = obs.depth.shape
+                decision.groundings[1].points.append((int(xx.max())/(w-1), int(yy.min())/(h-1)))
+            return decision
+
+    result = annotate(ConfirmBoth(['good', 'good']), obs, reference, allow_partial_seed_components=True)
+    assert len(result.attempts[0].ownership.object_points) == 196
+    assert len(result.ownership.object_points) == 392
+    assert result.ownership.report['unresolved_measured_component_count'] == 0
+    assert result.report['reply_results_merged'] is False

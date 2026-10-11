@@ -61,7 +61,7 @@ def _correction_feedback(crop, diagnostics, source_reply):
     if (diagnostics.get('frame_id') != obs.frame_id or
             diagnostics.get('camera_id') != obs.camera_id):
         raise ValueError('object annotation feedback must belong to the unchanged source image')
-    failures = diagnostics.get('abstentions') or [diagnostics]
+    failures = diagnostics.get('abstentions') or ([diagnostics] if diagnostics.get('failure') else [])
     h, w = obs.depth.shape
     offset = np.asarray(crop.bounds_xyxy[:2])
     seeds = [p for g in source_reply.groundings if g.role == 'object' and g.kind == 'points'
@@ -97,10 +97,31 @@ def _correction_feedback(crop, diagnostics, source_reply):
                 samples.append({'pixel': pixel, 'normalized': normalized, 'reasons': list(reasons)})
                 seen.add(key)
         entries.append(entry)
+    review = []
+    for component in diagnostics.get('unresolved_measured_components', []):
+        bounds = np.asarray(component['bbox_xyxy'])
+        if (bounds.shape != (4,) or not np.issubdtype(bounds.dtype, np.integer)
+                or np.any(bounds[:2] > bounds[2:])):
+            raise ValueError('object review requires an inclusive measured component rectangle')
+        local = bounds - np.tile(offset, 2)
+        if np.any(local < 0) or np.any(local > [w-1, h-1, w-1, h-1]):
+            raise ValueError('unresolved component lies outside the supplied crop')
+        review.append({'pixels': component['pixels'],
+            'original_anchor_pixels': component['original_anchor_pixels'],
+            'bbox_pixel_xyxy': local.tolist(),
+            'bbox_normalized_xyxy': (local / [w-1, h-1, w-1, h-1]).tolist(),
+            'bounds_convention': 'both_pixel_endpoints_inclusive',
+            'semantic_status': 'unresolved; may be the target, another object or background'})
     return {'frame_id': obs.frame_id, 'camera_id': obs.camera_id,
         'coordinate_space': 'supplied_crop_normalized_pixel_centers',
         'image_shape_hw': [h, w], 'failures': entries, 'rejected_samples': samples,
-        'scope': 'Actual previous reply and measured rejection only; no replacement seeds, accepted mask or map collision points.'}
+        'unresolved_measured_components': review,
+        'unresolved_measured_component_count': diagnostics.get('unresolved_measured_component_count', 0),
+        'component_review_scope': 'These are unseeded depth components inside your previous region. '
+            'Geometry only nominates areas for visual inspection; it establishes no object identity, '
+            'ownership, contact or free space. Rectangles are not proposed seeds or accepted masks. '
+            'Confirm from the unmarked image or leave uncertain components unowned.',
+        'scope': 'Actual previous reply and measured geometry only; no replacement seeds, accepted mask or map collision points.'}
 
 
 def annotate_source_object(vlm, source_obs, original_object, target_id, support_z, *,
@@ -108,7 +129,7 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
                            target_description='') -> ObjectAnnotationResult:
     """At most two semantic replies on one fixed source crop and reference.
 
-    Only measured ownership rejection/abstention permits one correction. Invalid
+    Measured rejection, abstention or unresolved components permit one correction. Invalid
     actions/identity, crop failures and client failures stop conservatively.
     The VLM may have its own bounded transport/schema retries; those are counted
     separately from the maximum two semantic requests here. No observations,
@@ -171,7 +192,8 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
             ownership = resolve_object_ownership(source_obs, source_reply, reference, target_id,
                 support_z, robot_depth, allow_partial_seed_components=allow_partial_seed_components)
             log['ownership'] = copy.deepcopy(ownership.report)
-            if ownership.report.get('abstentions'):
+            if (ownership.report.get('abstentions') or
+                    ownership.report.get('unresolved_measured_components')):
                 feedback_diagnostics = ownership.report
         except ObjectOwnershipError as exc:
             log.update(error=str(exc), diagnostics=copy.deepcopy(exc.diagnostics))
@@ -202,6 +224,13 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
             'positive seeds. Do not mechanically move or just delete rejected clicks. The second '
             'image marks actual rejected pixels and gives a coordinate grid; it provides no object '
             'labels or desired boundaries. Both images share normalized pixel-center coordinates. '
+            'If geometry_diagnostics lists unresolved_measured_components, inspect those areas '
+            'independently in the unmarked image. They are measured pieces inside your own previous '
+            'region without a positive seed, not confirmed target material. They may instead belong '
+            'to another object or the background. Add an explicit object seed only if you visually '
+            'confirm membership; do not copy the diagnostic rectangles as grounding or infer '
+            'membership from reference overlap. Visible pieces can be separated by occlusion or '
+            'depth discontinuities. Never bridge empty space or mark the gripper as the object. '
             'Use the FIRST unmarked image for all output coordinates. Omit uncertain surfaces. '
             'This reply is evaluated independently; earlier accepted regions are not merged into it.')
     return finish()

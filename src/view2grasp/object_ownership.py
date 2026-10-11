@@ -1,7 +1,7 @@
 """Explicit source-image object ownership, separate from contact permission.
 
-This module has no active runner call site. A historical image establishes only
-source-pose ownership; callers must establish a rigid attachment transform before
+A historical image establishes only source-pose ownership; callers must
+establish a rigid attachment transform before
 using its points as a carried collision envelope. Nothing here changes a map,
 grasp ray, contact region, or UNKNOWN classification.
 """
@@ -50,6 +50,48 @@ def _readonly(array):
     result = np.asarray(array).copy()
     result.flags.writeable = False
     return result
+
+
+def _unresolved_component_review(candidate, xyz, labelled, reference_tree, lo, hi):
+    """Report unseeded measured components without assigning them an identity."""
+    h, w = candidate.shape
+    seen = labelled.copy()
+    eligible = []
+    # Seeded floods already visited their complete components, including
+    # rejected ones. Never offer accepted or abstained material for automatic
+    # reconsideration, nor cross a hole, negative point or filtered depth gap.
+    for y, x in np.argwhere(candidate & ~seen):
+        if seen[y, x]:
+            continue
+        seen[y, x] = True
+        stack = [(y, x)]
+        component = []
+        while stack:
+            yy, xx = stack.pop()
+            component.append((yy, xx))
+            for ny, nx in ((yy-1, xx), (yy+1, xx), (yy, xx-1), (yy, xx+1)):
+                if (0 <= ny < h and 0 <= nx < w and candidate[ny, nx] and not seen[ny, nx]
+                        and np.linalg.norm(xyz[ny, nx] - xyz[yy, xx]) <= COMPONENT_STEP_M):
+                    seen[ny, nx] = True
+                    stack.append((ny, nx))
+        pixels_yx = np.asarray(component, dtype=int)
+        points = xyz[pixels_yx[:, 0], pixels_yx[:, 1]]
+        if np.any((points < lo) | (points > hi)):
+            continue
+        anchors = int(np.count_nonzero(reference_tree.query(points)[0] < ANCHOR_DISTANCE_M))
+        if anchors < 4:
+            continue
+        y0, x0 = pixels_yx.min(axis=0)
+        y1, x1 = pixels_yx.max(axis=0)
+        eligible.append({'pixels': len(points), 'original_anchor_pixels': anchors,
+            'bbox_xyxy': [int(x0), int(y0), int(x1), int(y1)]})
+    # Python's stable sort preserves source row-major component order on ties.
+    eligible.sort(key=lambda item: -item['pixels'])
+    return {'unresolved_measured_components': eligible[:3],
+        'unresolved_measured_component_count': len(eligible),
+        'review_scope': 'Unseeded measured components inside the supplied semantic region only. '
+            'Geometric eligibility is not object identity, ownership, contact permission or FREE evidence. '
+            'Only a new explicit semantic reply may select them; bbox_xyxy uses inclusive source-image pixels.'}
 
 
 @dataclass(frozen=True)
@@ -221,6 +263,9 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
         total_anchors += anchors
         components.append(item)
     report.update(partial=bool(abstentions), abstentions=abstentions)
+    if allow_partial_seed_components:
+        report.update(_unresolved_component_review(candidate, xyz, labels >= 0,
+            reference_tree, lo, hi))
     if allow_partial_seed_components and not components:
         reject('no_accepted_components', 'object ownership abstained from every explicit seed component')
     if total_anchors < 4:
