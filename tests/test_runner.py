@@ -35,10 +35,11 @@ def test_observation_grounding_planner_recording_pipeline(tmp_path,monkeypatch):
 
 def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
                     strategy='active',max_observations=9,always_observe=False,task='mug',
-                    rejection_state=0,observe_until_grounding_deadline=False):
+                    rejection_state=0,observe_until_grounding_deadline=False,
+                    retire_payload_from_surface=False):
     """Exercise the runner's real recovery transaction without rendering or VLM IO."""
     from view2grasp import runner,recording
-    evidence=SimpleNamespace(observed=[],executed=[],advice=[],events=[],planning_frames=[],vlm=[])
+    evidence=SimpleNamespace(observed=[],executed=[],advice=[],advice_inputs=[],events=[],planning_frames=[],vlm=[])
     points=np.array([[i*.001,0.,1.] for i in range(20)])
     grasp=GraspCandidate(np.zeros(3),np.eye(3),.02,np.array([0.,0.,1.]),1.,0.,
         surface_point=points[0],grasp_center=points[0])
@@ -72,6 +73,8 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
     class Map:
         def __init__(self,resolution):
             self.resolution=resolution;self.surface=points;self.views=[];self.table_z=0.
+            if retire_payload_from_surface:self.surface=np.vstack([points,[[.8,.9,1.]]])
+            evidence.map=self
         def integrate(self,obs,*args):self.views.append(obs)
         def classify(self,p):return np.full(len(p),rejection_state,dtype=np.uint8)
         def certify_home(self,*args):pass
@@ -79,7 +82,8 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
         def set_table(self,*args):pass
         def set_target(self,*args):pass
         def set_payload_source(self,*args):pass
-        def remove_target_endpoints(self,*args):pass
+        def remove_target_endpoints(self,*args):
+            if retire_payload_from_surface:self.surface=np.array([[.8,.9,1.]])
 
     class Plan:
         def __init__(self,robot,map_,rng):
@@ -129,6 +133,8 @@ def _budget_episode(tmp_path,monkeypatch,*,recovery_views,planned_on=None,
     def advice(*args,budget,**kwargs):
         assert kwargs.get('semantic_focus') is None # Ordinary block/mug behavior stays unchanged.
         evidence.advice.append(budget)
+        evidence.advice_inputs.append({'static_surface':evidence.map.surface.copy(),
+            'observed_points':kwargs['observed_points'].copy()})
         return {'views':[{} for _ in range(min(budget,recovery_views))]}
 
     monkeypatch.setattr(runner,'Simulator',Sim)

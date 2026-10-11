@@ -754,10 +754,20 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # arm corridor. Payload focus is used only once the arm is fully
                 # observed.
                 focus_for_advice=None if len(required_points) else focus
+                # Retiring a moving payload from the static collision map must
+                # not make the camera model see through its observed surfaces.
+                # This local union changes visibility ranking only; it never
+                # reintroduces static obstacles or certifies UNKNOWN as free.
+                advice_occluders=np.vstack([map_.surface,target])
                 payload_advice=suggest_views(robot,current_obs,coverage_points,budget=1,
-                    focus_points=focus_for_advice,observed_points=map_.surface,
+                    focus_points=focus_for_advice,observed_points=advice_occluders,
                     required_points=required_points if len(required_points) else None,
                     semantic_focus=target if task=='occluded' else None)
+                payload_advice['occlusion_evidence']={
+                    'basis':'static_surface_plus_observed_payload_reference',
+                    'static_surface_points':len(map_.surface),'payload_reference_points':len(target),
+                    'scope':'Visibility prediction only; observed references do not certify current visibility.',
+                    'visibility_prediction_tolerance_unchanged':True}
                 history.append({'coverage_advice':payload_advice,
                     'scene_changed_since_observation':post_index==0,'feedback':
                     'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})
