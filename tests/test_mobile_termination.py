@@ -16,8 +16,9 @@ from view2grasp.types import AgentDecision,GroundingProposal
     ('abort',False),('rejected_navigation',False),
 ])
 @pytest.mark.parametrize('initial_bad_point',[False,True])
+@pytest.mark.parametrize('task',['NavigateKitchen','DeliverCanToBowl'])
 def test_terminal_reason_after_rejected_grounding_and_successful_drive(
-        monkeypatch,tmp_path,last_action,verified,initial_bad_point):
+        monkeypatch,tmp_path,last_action,verified,initial_bad_point,task):
     """Run the actual orchestration and short-drive loop with offline devices.
 
     The first proposal is rejected, the second drives the base, and the last
@@ -35,6 +36,10 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
             self.frame_id=0;self.phase='observe';self.verification_steps=0
             simulations.append(self)
         def auxiliary_state(self):return {}
+        def camera_calibration(self,camera):
+            # Calibration must not acquire a candidate image or change state.
+            pose=np.eye(4);pose[:2,3]=self.base_pose[:2]
+            return observation().K,pose
         def observe(self,camera=None):
             self.camera=camera or self.camera;self.frame_id+=1
             pose=np.eye(4);pose[:2,3]=self.base_pose[:2]
@@ -59,7 +64,7 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
         def boundary_points(self,*args):return np.array([[0.,0.,1.]])
         def volumes(self,*args):return []
         def visual_volumes(self,*args):return []
-        def depth(self,obs):return np.zeros_like(obs.depth)
+        def depth(self,obs):return np.full_like(obs.depth,10.)
         def close(self):pass
 
     class Map:
@@ -81,8 +86,18 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
         def decide(self,obs,instruction,history):
             self.calls+=1
             assert self.calls<=3,'runner must stop at the terminal decision'
-            context=history[-1]['navigation_context']
-            assert context['frame_id']==obs.frame_id and context['camera_id']==obs.camera_id
+            if task=='NavigateKitchen':
+                context=history[-1]['navigation_context']
+                assert context['frame_id']==obs.frame_id and context['camera_id']==obs.camera_id
+            elif self.calls==1:
+                assert 'target_framing' not in history[-1]
+            else:
+                context=history[-1]['target_framing']
+                assert context['source_frame_id']==1 and context['target_id']=='can'
+                assert context['source_pixels']==[[23,16]]
+                assert context['current_frame_id']==obs.frame_id
+                assert context['source_age_frames']==obs.frame_id-1
+                assert 'No candidate camera image was read' in context['scope']
             if self.calls==2 and initial_bad_point:
                 rejected=next(item for item in reversed(history) if 'navigation_grounding' in item)
                 assert rejected['navigation_grounding']['frame_id']==decisions[0].frame_id
@@ -96,6 +111,9 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
                     frame_id=obs.frame_id,camera_id=obs.camera_id,
                     points=[(.5,.5) if self.calls==1 else (.9,.5)])]
             if action=='rejected_navigation':action='navigate'
+            if task!='NavigateKitchen' and self.calls==1:
+                groundings.append(GroundingProposal(kind='points',role='object',target_id='can',
+                    frame_id=obs.frame_id,camera_id=obs.camera_id,points=[(.75,.5)]))
             decision=AgentDecision(action=action,frame_id=obs.frame_id,camera_id=obs.camera_id,
                 groundings=groundings,reason='stop requested' if action=='abort' else '')
             decisions.append(decision)
@@ -124,9 +142,9 @@ def test_terminal_reason_after_rejected_grounding_and_successful_drive(
     monkeypatch.setattr(runner,'save_observation',lambda *args:None)
     monkeypatch.setattr(runner,'save_episode',save_result)
 
-    result=runner.run_mobile_episode('NavigateKitchen',3,'active',tmp_path,
-        ExperimentConfig(navigation_observations=3,perception_backend='rgbd'))
-    out=tmp_path/'NavigateKitchen_active_0003'
+    result=runner.run_mobile_episode(task,3,'active',tmp_path,
+        ExperimentConfig(navigation_observations=3,mobile_observations=3,perception_backend='rgbd'))
+    out=tmp_path/f'{task}_active_0003'
     events=json.loads((out/'events.json').read_text())
     assert json.loads((out/'result.json').read_text())==result
     assert len(decisions)==3 and result['observations']==3

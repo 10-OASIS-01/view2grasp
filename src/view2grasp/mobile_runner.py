@@ -19,6 +19,7 @@ from .navigation import NavigationCollision,SE2Planner,velocity_command,wrap_ang
 from .recording import save_observation,save_episode
 from .vlm import VLM
 from .view_advisor import suggest_mounted_cameras
+from .target_framing import TargetFraming
 
 
 class NavigationGroundingError(ValueError):
@@ -246,6 +247,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
     sim=robot=vlm=resolver=evaluator=None
     events=[];history=[];start=time.monotonic();rng=np.random.default_rng(seed)
     safety_observations=0;payload=None;grip=-1.;phase='navigate' if task=='NavigateKitchen' else 'find_object'
+    framing=TargetFraming()
     budget=config.navigation_observations if task=='NavigateKitchen' else config.mobile_observations
     duration=config.navigation_sim_seconds if task=='NavigateKitchen' else config.mobile_sim_seconds
     def event(kind,**data):
@@ -450,9 +452,35 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 'feedback':'Navigate using visible floor goals. Base motion is limited to 25 cm before observing again. Grasp only when target is reachable; place only when holding.'})
             if task=='NavigateKitchen':
                 history[-1]['navigation_context']=navigation_observation_context(obs,navmap.surface,self_depth)
+            elif phase=='find_object' and payload is None and framing.target is not None:
+                # Predict framing from the last explicit object grounding and
+                # current robot-mounted calibration, without acquiring images.
+                try:
+                    history[-1]['target_framing']=framing.context(obs,
+                        {camera:sim.camera_calibration(camera) for camera in CAMERAS})
+                except ValueError as exc:
+                    history[-1]['target_framing_unavailable']=str(exc)
+                    event('target_framing_unavailable',frame_id=obs.frame_id,reason=str(exc))
             decision=vlm.decide(obs,sim.instruction,history)
             save_observation(out/'observations',obs,decision);event('decision',**decision.model_dump())
             record.grounding_types.extend(g.kind for g in decision.groundings)
+            if task!='NavigateKitchen' and phase=='find_object' and payload is None:
+                objects=[g for g in decision.groundings if g.role=='object']
+                identities={g.target_id for g in objects}
+                if framing.target is not None and identities and identities!={framing.target.target_id}:
+                    framing.clear()
+                    event('target_framing_cleared',reason='explicit target identity changed')
+                try:
+                    if framing.refresh(obs,objects,self_depth):
+                        event('target_framing_observed',target_id=framing.target.target_id,
+                            frame_id=obs.frame_id,camera_id=obs.camera_id,
+                            selection=framing.target.selection)
+                except ValueError as exc:
+                    # Framing advice is optional and never changes the action's
+                    # grounding or grants a planner exemption.
+                    history.append({'target_framing_rejected':str(exc),
+                        'feedback':'Object framing evidence was rejected; ground any action from the acquired current image.'})
+                    event('target_framing_rejected',frame_id=obs.frame_id,reason=str(exc))
             try:
                 if decision.action=='abort':record.failure='agent_abort: '+decision.reason;break
                 if decision.action=='finish':
@@ -527,6 +555,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                                 'feedback':'The arm planner rejected these exact unknown path points. Observe the first recommended mounted camera that has not yet supplied the needed coverage; no unseen image was previewed.'})
                         raise ValueError('planning: '+arm.last_failure)
                     candidate,transit,approach=chosen
+                    framing.clear()
                     arm_execute(transit,-1,'pregrasp');arm_execute(approach,-1,'approach')
                     sim.phase='close';record.attempts+=1;sim.episode_attempt=record.attempts
                     for _ in range(25):step(sim.q,1)
@@ -554,6 +583,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                         # No lift motion was executed. Release at the original
                         # support rather than retaining a false carried state.
                         sim.phase='release_failed_grasp';grip=-1.
+                        framing.clear()
                         for _ in range(25):step(sim.q,grip)
                         arm.attached=None;payload=None;arm.gripper=sim.gripper_q
                         for map_ in (local,navmap):
@@ -593,6 +623,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                             lower.append(q)
                     finally:arm.allow_payload_support=False
                     arm_execute(np.array(lower),grip,'lower');grip=-1.;sim.phase='release'
+                    framing.clear()
                     for _ in range(45):step(sim.q,grip)
                     arm.attached=None;payload=None;phase='verify'
                     local.clear_dynamic();navmap.clear_dynamic()

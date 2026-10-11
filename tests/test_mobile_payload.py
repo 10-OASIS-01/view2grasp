@@ -207,7 +207,7 @@ def test_lift_or_later_evidence_failure_never_allows_unverified_motion(monkeypat
         def points(self,*args):return (np.zeros((1,3)),)
         def volumes(self,*args):return []
         def visual_volumes(self,*args):return []
-        def depth(self,obs):return np.zeros_like(obs.depth)
+        def depth(self,obs):return np.full_like(obs.depth,10.)
         def pose(self,q):return np.array([0.,0.,.84+q[0]]),np.eye(3)
         def grasp_center_offset(self):return np.zeros(3)
         def close(self):pass
@@ -274,6 +274,7 @@ def test_lift_or_later_evidence_failure_never_allows_unverified_motion(monkeypat
         (out/'events.json').write_text(json.dumps(events)))
     result=runner.run_mobile_episode('DeliverCanToBowl',3,'active',tmp_path,ExperimentConfig())
     second_state=next(row for row in reversed(histories[1]) if 'holding' in row)
+    assert 'target_framing' not in second_state, 'pre-grasp static evidence must expire when the arm acts'
     events=json.loads((tmp_path/'DeliverCanToBowl_active_0003/events.json').read_text())
     assert not result['success']
     if later_drop:
