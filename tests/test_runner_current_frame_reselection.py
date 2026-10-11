@@ -42,8 +42,13 @@ def episode(tmp_path,monkeypatch,*,diagnostic=None,fresh_action='grasp',invalid=
         def observe(self):
             self.frame+=1;e.frames.append(self.frame)
             size=256 if refinement else 4
+            # A real image-sized focal length keeps the synthetic crop above
+            # the observed table. Identity K at 256 px projects its pixels far
+            # below support and correctly triggers the empty-crop fallback.
+            K=(np.array([[256.,0.,127.5],[0.,256.,127.5],[0.,0.,1.]])
+                if refinement else np.eye(3))
             return Observation(self.frame,np.full((size,size,3),self.frame,np.uint8),np.ones((size,size)),
-                np.eye(3),orbit_pose(*self.view),self.q,self.gripper_q,0.,self.view)
+                K,orbit_pose(*self.view),self.q,self.gripper_q,0.,self.view)
         def move_camera(self,*view):self.view=tuple(view);e.moves.append(self.view)
         def validate_initial_proxies(self,*args):pass
         def step(self,*args):pytest.fail('failed planning never permits robot motion')

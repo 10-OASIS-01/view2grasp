@@ -1,0 +1,460 @@
+{
+  "metadata": {
+    "source_episode": "runs/handoff-occluded-13/occluded_active_0005",
+    "source_events_sha256": "bc2160d8e63bb4cec7aa944a24ce25f6d8f3132de63d2612492450317c243617",
+    "source_snapshot_sha256": "7e656dff6d2637bcbcfc7b99b03f736877d2fa76cc4c495a8046dffc6e0997d5",
+    "evidence": "Unmodified actual resolver rejection diagnostics; neither reply passed strict association. No third reply or episode success is claimed."
+  },
+  "first": {
+    "frame_id": 4,
+    "camera_id": "activeview",
+    "coordinate_space": "source_image_normalized_pixel_centers",
+    "source_shape_hw": [
+      1024,
+      1024
+    ],
+    "role": "object",
+    "failure": "reference_inconsistency",
+    "proposed_pixels": 748,
+    "valid_pixels": 649,
+    "anchor_pixels": 72,
+    "rejection_counts": {
+      "invalid_depth": 0,
+      "support": 99,
+      "robot": 0,
+      "reference_distance": 32,
+      "reference_overlap_insufficient": 0,
+      "unanchored_component": 0
+    },
+    "rejected_pixel_count": 32,
+    "rejected_samples": [
+      {
+        "pixel": [
+          579,
+          565
+        ],
+        "normalized": [
+          0.5659824046920822,
+          0.552297165200391
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4820753335952759,
+        "world_z_m": 0.8415621539811964,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.04835217192036831,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          581,
+          565
+        ],
+        "normalized": [
+          0.5679374389051809,
+          0.552297165200391
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4798697233200073,
+        "world_z_m": 0.8417235301420336,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.04629900800113516,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          584,
+          565
+        ],
+        "normalized": [
+          0.570869990224829,
+          0.552297165200391
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.476555347442627,
+        "world_z_m": 0.8419660304879288,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.04387363090454164,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          586,
+          566
+        ],
+        "normalized": [
+          0.5728250244379277,
+          0.5532746823069403
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4743417501449585,
+        "world_z_m": 0.84011169179588,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.042872115233399365,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          563,
+          572
+        ],
+        "normalized": [
+          0.5503421309872922,
+          0.5591397849462365
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.5000730752944946,
+        "world_z_m": 0.8258849028343928,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.07542427668966813,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          564,
+          573
+        ],
+        "normalized": [
+          0.5513196480938416,
+          0.5601173020527859
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4989361763000488,
+        "world_z_m": 0.8239290347434711,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.0741229306070473,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          564,
+          574
+        ],
+        "normalized": [
+          0.5513196480938416,
+          0.5610948191593352
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4989361763000488,
+        "world_z_m": 0.821879100349056,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.07469819071134559,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          563,
+          576
+        ],
+        "normalized": [
+          0.5503421309872922,
+          0.5630498533724341
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.5000730752944946,
+        "world_z_m": 0.8176789459969972,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.077781367811908,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          564,
+          577
+        ],
+        "normalized": [
+          0.5513196480938416,
+          0.5640273704789834
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4989361763000488,
+        "world_z_m": 0.8157292971658107,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.07672730302258536,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          563,
+          579
+        ],
+        "normalized": [
+          0.5503421309872922,
+          0.5659824046920822
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.5000730752944946,
+        "world_z_m": 0.8115244783689506,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.0800572401134817,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          564,
+          580
+        ],
+        "normalized": [
+          0.5513196480938416,
+          0.5669599217986315
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.4989361763000488,
+        "world_z_m": 0.8095794939825653,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.07918319595138873,
+        "supported_downward_eligible": false
+      },
+      {
+        "pixel": [
+          579,
+          588
+        ],
+        "normalized": [
+          0.5659824046920822,
+          0.5747800586510264
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.374149203300476,
+        "world_z_m": 0.8062353383704036,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.03783253500956473,
+        "supported_downward_eligible": false
+      }
+    ],
+    "samples_truncated": true,
+    "reference_projection": {
+      "kind": "hypothesis_not_current_visibility",
+      "bbox_normalized": [
+        0.5516966445159336,
+        0.5529505942081507,
+        0.5818748115642853,
+        0.5560820369749913
+      ],
+      "intersects_image": true
+    },
+    "thresholds": {
+      "support_clearance_m": 0.006,
+      "robot_clearance_m": 0.003,
+      "reference_anchor_m": 0.004,
+      "reference_expansion_m": 0.035,
+      "component_step_m": 0.006,
+      "min_valid_pixels": 4,
+      "min_anchor_pixels": 4
+    },
+    "supported_downward_association": {
+      "source_supported": true,
+      "basis": "fixed_original_object_xy_hull_and_observed_support",
+      "xy_tolerance_m": 0.004,
+      "support_z_m": 0.7999970586058818,
+      "minimum_z_exclusive_m": 0.8059970586058818,
+      "maximum_z_inclusive_m": 0.8437854318486147,
+      "status": "available",
+      "original_xy_hull": [
+        [
+          0.02667663782226133,
+          -0.03311151702126237
+        ],
+        [
+          0.01565763591318449,
+          -0.055716950231095415
+        ],
+        [
+          0.011893182553588857,
+          -0.06708096183219694
+        ],
+        [
+          0.011893182553588857,
+          -0.07463938006681069
+        ],
+        [
+          0.019418521368987113,
+          -0.07834439612829304
+        ],
+        [
+          0.045645433943443524,
+          -0.08937534760585258
+        ],
+        [
+          0.04937801041996727,
+          -0.08557182936381547
+        ],
+        [
+          0.05310707108128217,
+          -0.07801226617111427
+        ],
+        [
+          0.06427320273828424,
+          -0.05537624906517849
+        ],
+        [
+          0.06427320273828424,
+          -0.05162192709465798
+        ],
+        [
+          0.05683262074397739,
+          -0.04791267812818014
+        ],
+        [
+          0.04190933683512105,
+          -0.040473186688478525
+        ],
+        [
+          0.034363018359241715,
+          -0.03677563877629826
+        ]
+      ],
+      "eligible_beyond_reference_limit_pixels": 36
+    }
+  },
+  "second": {
+    "frame_id": 4,
+    "camera_id": "activeview",
+    "coordinate_space": "source_image_normalized_pixel_centers",
+    "source_shape_hw": [
+      1024,
+      1024
+    ],
+    "role": "object",
+    "failure": "reference_inconsistency",
+    "proposed_pixels": 597,
+    "valid_pixels": 580,
+    "anchor_pixels": 56,
+    "rejection_counts": {
+      "invalid_depth": 0,
+      "support": 17,
+      "robot": 0,
+      "reference_distance": 1,
+      "reference_overlap_insufficient": 0,
+      "unanchored_component": 0
+    },
+    "rejected_pixel_count": 1,
+    "rejected_samples": [
+      {
+        "pixel": [
+          579,
+          587
+        ],
+        "normalized": [
+          0.5659824046920822,
+          0.5738025415444771
+        ],
+        "reasons": [
+          "reference_distance"
+        ],
+        "depth_m": 1.374149203300476,
+        "world_z_m": 0.8081146149930127,
+        "robot_depth_m": 124.0968246459961,
+        "reference_distance_m": 0.03596818794504951,
+        "supported_downward_eligible": false
+      }
+    ],
+    "samples_truncated": false,
+    "reference_projection": {
+      "kind": "hypothesis_not_current_visibility",
+      "bbox_normalized": [
+        0.5516966445159336,
+        0.5529505942081507,
+        0.5818748115642853,
+        0.5560820369749913
+      ],
+      "intersects_image": true
+    },
+    "thresholds": {
+      "support_clearance_m": 0.006,
+      "robot_clearance_m": 0.003,
+      "reference_anchor_m": 0.004,
+      "reference_expansion_m": 0.035,
+      "component_step_m": 0.006,
+      "min_valid_pixels": 4,
+      "min_anchor_pixels": 4
+    },
+    "supported_downward_association": {
+      "source_supported": true,
+      "basis": "fixed_original_object_xy_hull_and_observed_support",
+      "xy_tolerance_m": 0.004,
+      "support_z_m": 0.7999970586058818,
+      "minimum_z_exclusive_m": 0.8059970586058818,
+      "maximum_z_inclusive_m": 0.8437854318486147,
+      "status": "available",
+      "original_xy_hull": [
+        [
+          0.02667663782226133,
+          -0.03311151702126237
+        ],
+        [
+          0.01565763591318449,
+          -0.055716950231095415
+        ],
+        [
+          0.011893182553588857,
+          -0.06708096183219694
+        ],
+        [
+          0.011893182553588857,
+          -0.07463938006681069
+        ],
+        [
+          0.019418521368987113,
+          -0.07834439612829304
+        ],
+        [
+          0.045645433943443524,
+          -0.08937534760585258
+        ],
+        [
+          0.04937801041996727,
+          -0.08557182936381547
+        ],
+        [
+          0.05310707108128217,
+          -0.07801226617111427
+        ],
+        [
+          0.06427320273828424,
+          -0.05537624906517849
+        ],
+        [
+          0.06427320273828424,
+          -0.05162192709465798
+        ],
+        [
+          0.05683262074397739,
+          -0.04791267812818014
+        ],
+        [
+          0.04190933683512105,
+          -0.040473186688478525
+        ],
+        [
+          0.034363018359241715,
+          -0.03677563877629826
+        ]
+      ],
+      "eligible_beyond_reference_limit_pixels": 36
+    }
+  }
+}

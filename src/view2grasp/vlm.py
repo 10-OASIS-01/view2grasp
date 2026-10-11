@@ -344,8 +344,8 @@ class VLM:
         if grounding_refinement is not None:
             user['allowed_actions']=['grasp','abort']
             user['response_contract']+=(' This is a before-ray grounding refinement. Return grasp with fresh explicit '
-                'object AND grasp_part regions, or abort. Every coordinate is normalized to this supplied crop image_size, '
-                'not the original full image. Do not return observe or a camera command.')
+                'object AND grasp_part regions, or abort. Every coordinate is normalized to this supplied image_size. '
+                'Use derived_image_context for its bounds. Do not return observe or a camera command.')
             user['grounding_refinement_context']={
                 'purpose':'before_ray_same_frame_grasp_refinement','frame_id':obs.frame_id,
                 'camera_id':obs.camera_id,'acquires_new_observation':False,
@@ -368,6 +368,13 @@ class VLM:
                     'depth, grounding, ray, IK and collision checks. Cropping grants no visibility, contact or safety evidence. '
                     'Ignore older mapping-only preserve-ray instructions: this is before-ray semantic refinement, '
                     'not an observe annotation and not a request for another image.'}
+            if grounding_refinement.get('kind')=='full_acquired_observation':
+                user['grounding_refinement_context']['instructions']+=(
+                    ' In this request the supplied image is the COMPLETE current acquired frame, with identity '
+                    'crop bounds. References above to a crop mean this entire supplied image. The earlier coarse '
+                    'region had no depth pixels satisfying necessary contact conditions; it is not a location hint. '
+                    'Locate the requested object and part afresh in the full image, or abort. Coordinates refer '
+                    'directly to this full image_size; no earlier crop coordinates should be reused.')
             if grounding_refinement_feedback is not None:
                 user['grounding_refinement_feedback']=copy.deepcopy(grounding_refinement_feedback)
                 user['grounding_refinement_context']['instructions']+=(' The previous crop reply failed the actual '

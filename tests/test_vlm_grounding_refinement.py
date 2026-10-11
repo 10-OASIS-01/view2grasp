@@ -65,7 +65,7 @@ def test_refinement_logs_exact_crop_and_demands_fresh_grasp_before_ray(tmp_path)
     assert 'any polygon hole must lie inside its outer boundary' in refinement['instructions']
     # The preference does not rewrite the model's polygon into a synthesized box.
     assert answer.groundings[0].kind=='polygon'
-    assert 'not the original full image' in context['response_contract']
+    assert 'Use derived_image_context for its bounds' in context['response_contract']
     assert 'Do not return observe' in context['response_contract']
     image_path=logged['messages'][1]['content'][1]['image_url']['url']
     assert image_path.startswith('input_frame_001_')
@@ -91,7 +91,22 @@ def test_observe_and_legacy_grounding_are_rejected_not_coerced_to_grasp(tmp_path
     assert 'fresh explicit object AND grasp_part regions' in records[1]['error']
     assert records[2]['error'] is None
     assert [len(r['request']['messages']) for r in records]==[2,4,6]
-    assert 'supplied crop image_size' in requests[1]['messages'][-1]['content']
+    assert 'supplied image_size' in requests[1]['messages'][-1]['content']
+
+
+def test_full_acquired_refinement_has_identity_coordinate_contract(tmp_path):
+    obs=observation();evidence=provenance(obs);requests=[]
+    evidence.update(kind='full_acquired_observation',source_shape_hw=list(obs.depth.shape),
+        bounds_xyxy=[0,0,obs.depth.shape[1],obs.depth.shape[0]])
+    client=client_with_replies(tmp_path,[grasp(obs)],requests)
+    try:answer=client.decide(obs,'Grasp the handle',[],force_grasp=True,
+        grounding_refinement=evidence,derived_image_context=evidence)
+    finally:client.client.close()
+    assert answer.action=='grasp' and len(requests)==1
+    context=json.loads((tmp_path/'call_000.json').read_text())['request']['context']
+    assert 'COMPLETE current acquired frame, with identity' in context['grounding_refinement_context']['instructions']
+    assert 'not the original full image' not in context['response_contract']
+    assert context['derived_image_context']['bounds_xyxy']==[0,0,32,32]
 
 
 @pytest.mark.parametrize('fault',['frame','camera','source','points_only','candidate_only'])

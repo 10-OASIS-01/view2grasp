@@ -27,8 +27,9 @@ class ObservationCrop:
 
     def provenance(self):
         """JSON-safe metadata; all bounds use NumPy's half-open convention."""
+        full_frame = self.reference_kind == 'full_frame_after_empty_proposal_crop'
         return {
-            'kind': 'crop_of_acquired_observation',
+            'kind': 'full_acquired_observation' if full_frame else 'crop_of_acquired_observation',
             'source_frame_id': self.observation.frame_id,
             'source_camera_id': self.observation.camera_id,
             'source_timestamp': float(self.observation.timestamp),
@@ -42,7 +43,8 @@ class ObservationCrop:
             'min_size_pixels': self.min_size,
             'reference_point_count': self.reference_point_count,
             'reference_kind': self.reference_kind,
-            'reference_use': ('proposal_extent_only_not_current_visibility_or_contact_evidence'
+            'reference_use': ('complete_current_image_only_not_localization_or_contact_evidence' if full_frame else
+                'proposal_extent_only_not_current_visibility_or_contact_evidence'
                 if self.reference_kind=='current_vlm_object_pixel_region' else
                 'projection_only_not_current_visibility_or_contact_evidence'),
             'new_observation': False,

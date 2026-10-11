@@ -28,7 +28,14 @@ from .payload_registration import register_payload_source,PayloadRegistrationErr
 
 def _contact_annotation_progressed(previous, current):
     """Authorize a bounded final semantic reply, never accept geometry here."""
-    if previous is None or current is None:return False
+    for report in (previous,current):
+        if not isinstance(report,dict):return False
+        if (type(report.get('frame_id')) is not int or report['frame_id']<0 or
+                not isinstance(report.get('camera_id'),str) or not report['camera_id'] or
+                report.get('role') not in ('object','grasp_part')):
+            return False
+        for key in ('anchor_pixels','rejected_pixel_count'):
+            if type(report.get(key)) is not int or report[key]<0:return False
     if (previous.get('frame_id')!=current.get('frame_id') or
             previous.get('camera_id')!=current.get('camera_id')):
         return False
@@ -37,6 +44,36 @@ def _contact_annotation_progressed(previous, current):
             (previous['anchor_pixels'],-previous['rejected_pixel_count'])):
         return True
     if previous['role']!=current['role']:return False
+    if all(report.get('failure')=='reference_inconsistency' for report in (previous,current)):
+        # Fewer real expansion violations can be progress even when correcting
+        # the boundary removes some anchors. This only unlocks the final reply;
+        # the resolver still rejects every remaining violation and uses the
+        # same immutable references. Never infer progress from a sample count.
+        for report in (previous,current):
+            shape=report.get('source_shape_hw')
+            rejection_counts=report.get('rejection_counts')
+            if (not isinstance(shape,(list,tuple)) or len(shape)!=2 or
+                    any(type(n) is not int or n<2 for n in shape) or
+                    not isinstance(rejection_counts,dict)):
+                return False
+            proposed=report.get('proposed_pixels');valid=report.get('valid_pixels')
+            distance=rejection_counts.get('reference_distance')
+            if any(type(n) is not int or n<0 for n in (proposed,valid,distance)):
+                return False
+            if (not 4<=report['anchor_pixels']<=valid<=proposed<=shape[0]*shape[1] or
+                    not 0<distance<=report['rejected_pixel_count']<=valid or
+                    report['anchor_pixels']+distance>valid):
+                return False
+            # These failure modes have not been evaluated or reached on this
+            # path; a neighbor-component/overlap failure is not this repair.
+            for key in ('reference_overlap_insufficient','unanchored_component'):
+                if type(rejection_counts.get(key)) is not int or rejection_counts[key]!=0:
+                    return False
+        return (previous['source_shape_hw']==current['source_shape_hw'] and
+            current['rejection_counts']['reference_distance']<previous['rejection_counts']['reference_distance'] and
+            current['rejected_pixel_count']<previous['rejected_pixel_count'] and
+            current['rejected_pixel_count']*previous['valid_pixels']<
+                previous['rejected_pixel_count']*current['valid_pixels'])
     for report in (previous,current):
         if (report.get('failure')!='unanchored_component' or report['anchor_pixels']<4 or
                 report.get('rejection_counts',{}).get('reference_distance')!=0):
