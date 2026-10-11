@@ -39,9 +39,14 @@ class AnnotationDiagnostic:
             'source_frame_id': self.source_frame_id, 'source_camera_id': self.source_camera_id,
             'source_shape_hw': [h, w], 'source_rgb_sha256': self.source_rgb_sha256,
             'diagnostic_shape_hw': list(self.rgb.shape[:2]), 'diagnostic_rgb_sha256': _rgb_hash(self.rgb),
-            'resampling': 'nearest_neighbor_integer_scale', 'scale': self.scale,
-            'content_bounds_xyxy': [x0, y0, x0 + w * self.scale, y0 + h * self.scale],
+            'resampling': 'nearest_neighbor_endpoint_aligned_integer_centers', 'scale': self.scale,
+            'content_bounds_xyxy': [x0, y0, x0 + (w - 1) * self.scale + 1,
+                y0 + (h - 1) * self.scale + 1],
             'bounds_convention': 'left_top_inclusive_right_bottom_exclusive',
+            'source_to_diagnostic_pixel_centers': {'scale_xy': [self.scale, self.scale],
+                'offset_xy': [x0, y0]},
+            'normalized_pixel_centers_match_primary': True,
+            'external_margins_or_legend': False,
             'grid_step_source_pixels': self.grid_step,
             'rejected_pixels': [{'id': f'R{i + 1}', 'pixel': [x, y],
                 'normalized': [x / (w - 1), y / (h - 1)]}
@@ -87,33 +92,34 @@ def build_annotation_diagnostic(obs, feedback, *, scale=4, grid_step=8):
             raise ValueError('annotation diagnostic rejected pixel is outside the supplied image')
         pixel = tuple(map(int, np.rint(xy * [w - 1, h - 1])))
         if pixel not in rejected: rejected.append(pixel)
-    x0 = y0 = 44
-    canvas = Image.new('RGB', (x0 + w * scale + 280,
-        max(y0 + h * scale + 44, y0 + 40 + len(rejected) * 15 + 60)), (248, 248, 248))
-    canvas.paste(Image.fromarray(rgb).resize((w * scale, h * scale), Image.Resampling.NEAREST), (x0, y0))
+    # Align the first/last pixel CENTERS, so normalized coordinates are exactly
+    # shared with the primary image: scale*x/(scale*(w-1)) == x/(w-1).
+    # Ordinary repeat/resize adds half-pixel margins and would not satisfy this
+    # identity. No header, axes, padding, or legend creates a second image frame.
+    out_h, out_w = (h - 1) * scale + 1, (w - 1) * scale + 1
+    rows = np.rint(np.arange(out_h) / scale).astype(int)
+    columns = np.rint(np.arange(out_w) / scale).astype(int)
+    canvas = Image.fromarray(rgb[rows[:, None], columns[None, :]])
     draw = ImageDraw.Draw(canvas)
-    draw.text((x0, 5), 'DIAGNOSTIC ONLY - use FIRST unmarked image coordinates', fill=(0, 0, 0))
-    draw.text((x0, 19), f'Raw image: {w} x {h} pixels; display: {scale}x; axis labels are RAW pixel indices', fill=(0, 0, 0))
-    # Lines lie on cell borders. Every original pixel's magnified center stays
-    # byte-identical, including marked pixels and intersections of grid lines.
-    for x in range(0, w, grid_step):
-        xx = x0 + x * scale - 1
-        draw.line((xx, y0 - 1, xx, y0 + h * scale - 1), fill=(225, 225, 225), width=1)
-        draw.text((xx - 5, y0 - 16), str(x), fill=(0, 0, 0))
-    for y in range(0, h, grid_step):
-        yy = y0 + y * scale - 1
-        draw.line((x0 - 1, yy, x0 + w * scale - 1, yy), fill=(225, 225, 225), width=1)
-        draw.text((5, yy - 5), str(y), fill=(0, 0, 0))
-    legend_x = x0 + w * scale + 12
-    draw.text((legend_x, y0), 'Rejected pixel borders (magenta):', fill=(0, 0, 0))
-    for i, (x, y) in enumerate(rejected):
-        left, top = x0 + x * scale, y0 + y * scale
-        draw.rectangle((left, top, left + scale - 1, top + scale - 1), outline=(220, 0, 160), width=1)
-        draw.text((legend_x, y0 + 20 + i * 15), f'R{i + 1}: x={x}, y={y}  ({x/(w-1):.6f}, {y/(h-1):.6f})', fill=(100, 0, 80))
-    legend_y = max(y0 + 20 + len(rejected) * 15, y0 + 45)
-    for i, line in enumerate(('Not object identity or a mask.', 'Do not blindly erase marked pixels.',
-                              'Reinspect visible material/boundaries.', 'Return FIRST-image coordinates.')):
-        draw.text((legend_x, legend_y + i * 15), line, fill=(0, 0, 0))
+    # Lines are between source centers, including odd scale factors. At image
+    # edges draw only existing interior borders; clamping an outside border to
+    # the image edge would overwrite the first/last source pixel center.
+    half = scale // 2
+    for x in range(grid_step, w, grid_step):
+        xx = x * scale - half
+        draw.line((xx, 0, xx, out_h - 1), fill=(225, 225, 225), width=1)
+    for y in range(grid_step, h, grid_step):
+        yy = y * scale - half
+        draw.line((0, yy, out_w - 1, yy), fill=(225, 225, 225), width=1)
+    for x, y in rejected:
+        left, right = x * scale - half, x * scale + (scale + 1) // 2
+        top, bottom = y * scale - half, y * scale + (scale + 1) // 2
+        for xx in (left, right):
+            if 0 <= xx < out_w:
+                draw.line((xx, max(0, top), xx, min(out_h - 1, bottom)), fill=(220, 0, 160), width=1)
+        for yy in (top, bottom):
+            if 0 <= yy < out_h:
+                draw.line((max(0, left), yy, min(out_w - 1, right), yy), fill=(220, 0, 160), width=1)
     result = np.asarray(canvas).copy();result.setflags(write=False)
     return AnnotationDiagnostic(result, int(obs.frame_id), obs.camera_id, (h, w), _rgb_hash(rgb),
-        scale, (x0, y0), grid_step, tuple(rejected))
+        scale, (0, 0), grid_step, tuple(rejected))

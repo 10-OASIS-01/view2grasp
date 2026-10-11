@@ -648,7 +648,11 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 if task=='occluded':
                     association=contact_annotation(obs,decision,original_object,original_part,
                         'post-close object and permitted-part verification before lifting')
-                    post_association=association is not None
+                    # Camera-only observations do not advance physics. Keep a
+                    # verified post-close association through later mapping
+                    # views that cannot see the part; the next physical action
+                    # ends this evidence epoch and requires its own checks.
+                    post_association=post_association or association is not None
                     if association is not None:
                         target=np.unique(np.vstack([target,association.object_points]),axis=0)
                         target_part=np.unique(np.vstack([target_part,association.part_points]),axis=0)

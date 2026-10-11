@@ -19,10 +19,11 @@ def test_centers_and_raw_image_stay_exact_even_under_marks_and_grid_crossings():
     obs=observation();obs.rgb[:]=np.random.default_rng(9).integers(0,256,obs.rgb.shape,dtype=np.uint8)
     before=obs.rgb.copy();diagnostic=build_annotation_diagnostic(obs,feedback(obs))
     x0,y0=diagnostic.content_offset_xy;scale=diagnostic.scale;h,w=obs.depth.shape
-    centers=diagnostic.rgb[y0+scale//2:y0+h*scale:scale,x0+scale//2:x0+w*scale:scale]
+    centers=diagnostic.rgb[y0::scale,x0::scale]
     assert np.array_equal(centers,before) and np.array_equal(obs.rgb,before)
     for x,y in diagnostic.rejected_pixels:
-        assert np.array_equal(diagnostic.rgb[y0+y*scale,x0+x*scale],[220,0,160])
+        edge_x=x*scale+(scale//2 if x<w-1 else -scale//2)
+        assert np.array_equal(diagnostic.rgb[y*scale,edge_x],[220,0,160])
     assert not diagnostic.rgb.flags.writeable
     second=build_annotation_diagnostic(obs,feedback(obs))
     assert np.array_equal(diagnostic.rgb,second.rgb)
@@ -33,6 +34,8 @@ def test_centers_and_raw_image_stay_exact_even_under_marks_and_grid_crossings():
     assert not p['new_observation'] and p['source_pixel_centers_unchanged']
     assert p['rejected_pixels'][1]['pixel']==[15,16]
     assert 'NOT object labels' in p['scope']
+    assert p['normalized_pixel_centers_match_primary'] and not p['external_margins_or_legend']
+    assert p['content_bounds_xyxy']==[0,0,(w-1)*scale+1,(h-1)*scale+1]
 
 
 def test_current_crop_coordinates_do_not_use_retained_source_pixel_indices():
@@ -71,3 +74,31 @@ def test_empty_or_duplicate_samples_do_not_invent_rejected_pixels():
     obs=observation()
     assert not build_annotation_diagnostic(obs,feedback(obs,())).rejected_pixels
     assert build_annotation_diagnostic(obs,feedback(obs,((8,8),(8,8)))).rejected_pixels==((8,8),)
+
+
+@pytest.mark.parametrize('shape',[(2,2),(17,31),(128,128)])
+@pytest.mark.parametrize('scale',[4,5,6,7,8])
+def test_all_corners_edges_and_grid_crossings_keep_source_centers_and_normalized_coordinates(shape,scale):
+    h,w=shape
+    obs=replace(observation(),rgb=np.random.default_rng(17).integers(0,256,(h,w,3),dtype=np.uint8),
+        depth=np.ones((h,w)))
+    rejected=((0,0),(w-1,0),(0,h-1),(w-1,h-1),(w//2,0),(w//2,h-1),
+        (0,h//2),(w-1,h//2),(min(8,w-1),min(8,h-1)))
+    diagnostic=build_annotation_diagnostic(obs,feedback(obs,rejected),scale=scale)
+    dh,dw=diagnostic.rgb.shape[:2]
+    assert (dh,dw)==((h-1)*scale+1,(w-1)*scale+1)
+    assert diagnostic.content_offset_xy==(0,0)
+    assert np.array_equal(diagnostic.rgb[::scale,::scale],obs.rgb)
+    assert np.array_equal(np.arange(w)*scale/(dw-1),np.arange(w)/(w-1))
+    assert np.array_equal(np.arange(h)*scale/(dh-1),np.arange(h)/(h-1))
+    assert diagnostic.provenance()['source_to_diagnostic_pixel_centers']=={
+        'scale_xy':[scale,scale],'offset_xy':[0,0]}
+
+
+def test_unmarked_non_grid_pixels_are_only_endpoint_aligned_nearest_neighbor_samples():
+    obs=observation();obs.rgb[:]=np.random.default_rng(21).integers(0,256,obs.rgb.shape,dtype=np.uint8)
+    diagnostic=build_annotation_diagnostic(obs,feedback(obs,()),scale=4,grid_step=1000)
+    dh,dw=diagnostic.rgb.shape[:2]
+    expected=obs.rgb[np.rint(np.arange(dh)/4).astype(int)[:,None],
+        np.rint(np.arange(dw)/4).astype(int)[None,:]]
+    assert np.array_equal(diagnostic.rgb,expected)

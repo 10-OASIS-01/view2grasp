@@ -97,7 +97,12 @@ All proposals referring to one object and its parts MUST share the same target_i
 e.g. object=mug and grasp_part=mug_handle both use target_id="mug".
 Grasp: ground object and grasp_part (box/polygon/points); optionally give
 grasp_contact points on SOLID material, never a hole, background or robot.
-The planner derives contacts from regions when no point is supplied. For a
+The planner derives contacts from regions when no point is supplied. For a small
+solid object whose graspable face spans only a few pixels, prefer explicit object
+and grasp_part regions and OMIT optional grasp_contact / point coordinates: a
+coarsely rounded click can move the approach toward the face edge. Give a point
+only when a particular visible contact location is needed and can be located
+precisely. Explicit points remain binding and are never silently recentered. For a
 handle expose both the material and aperture; use negative points/holes to
 exclude background. Grasp approach stays within 15 degrees of the camera ray
 to the resolved contact. Choose a view giving reachable approach and clearance.
@@ -275,10 +280,12 @@ class VLM:
                     user['annotation_context']['instructions']+=(
                         ' The FIRST image is the unmarked current image and the only output coordinate system. '
                         'The SECOND image is a magnified coordinate aid from the same pixels; its grid and magenta pixel borders '
-                        'are geometry diagnostics, not object labels or a suggested mask. Use its raw-pixel indices to locate '
-                        'the rejected pixels, then visually reinspect material and boundaries in the first image. '
+                        'are geometry diagnostics, not object labels or a suggested mask. Both images have exactly the same '
+                        'field of view and normalized pixel-center coordinates: a location has the same normalized x,y in both. '
+                        'Raw-pixel labels for rejected pixels are listed in annotation_diagnostic metadata. '
+                        'Visually reinspect material and boundaries in the first image. '
                         'Do not blindly delete marked pixels. Return normalized FIRST-image coordinates x/(width-1), y/(height-1); '
-                        'never use the companion canvas dimensions, margins or grid cells as output coordinates.')
+                        'raw pixel indices always refer to the FIRST image_size, never to the magnified image or grid cells.')
         primary_url='data:image/png;base64,'+base64.b64encode(image.getvalue()).decode()
         image_references={primary_url:image_reference}
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
