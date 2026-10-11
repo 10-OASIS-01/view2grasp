@@ -9,7 +9,8 @@ import pytest
 
 from view2grasp.geometry import unproject
 from view2grasp.grounding import mask_rle, pixels
-from view2grasp.object_annotation import annotate_source_object
+from view2grasp.object_annotation import annotate_source_object, _correction_feedback
+from view2grasp.observation_crop import crop_observation
 from view2grasp.types import AgentDecision, GroundingProposal, Observation
 
 
@@ -289,3 +290,99 @@ def test_review_accepts_second_component_only_after_new_explicit_semantic_seed()
     assert len(result.ownership.object_points) == 392
     assert result.ownership.report['unresolved_measured_component_count'] == 0
     assert result.report['reply_results_merged'] is False
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_envelope_correction_marks_actual_tail_not_legal_seed_and_still_stops_at_two(partial):
+    obs, reference, _ = source_scene()
+    depth = obs.depth.copy()
+    depth[210:224, 230:274] = 1.
+    obs = replace(obs, depth=depth)
+    arrays = [obs.rgb, obs.depth, obs.K, obs.T_wc, reference]
+    before = [array.copy() for array in arrays]
+    client = FakeVLM(['good', 'good'])
+    result = annotate(client, obs, reference, allow_partial_seed_components=partial)
+
+    assert result.ownership is None and len(result.attempts) == 2
+    assert result.report['semantic_requests'] == result.report['vlm_calls'] == 2
+    assert result.report['new_observations'] == 0
+    assert client.requests[0]['obs'] is client.requests[1]['obs']
+    diagnostics = result.attempts[0].log['diagnostics']
+    failure = diagnostics['abstentions'][0] if partial else diagnostics
+    assert failure['rejected_pixel_count'] == 70
+    assert failure.get('pixels', failure.get('component_pixels')) == 14*44
+    feedback = client.requests[1]['history'][0]['source_object_annotation']['geometry_diagnostics']
+    x0, y0, _, _ = result.report['image_context']['bounds_xyxy']
+    expected = np.asarray(failure['rejected_pixels_xy']) - [x0, y0]
+    assert len(expected) == 12
+    assert [sample['pixel'] for sample in feedback['rejected_samples']] == expected.tolist()
+    assert all(sample['sample_kind'] == 'geometry_outlier' for sample in feedback['rejected_samples'])
+    entry = feedback['failures'][0]
+    assert entry['rejected_seed_pixels'] == []
+    assert [sample['pixel'] for sample in entry['rejected_geometry_pixels']] == expected.tolist()
+    if partial:
+        assert [s['pixel'] for s in entry['component_seed_pixels']] == [[230-x0, 210-y0]]
+        assert len(failure['source_pixels_xy']) == 14*44  # Whole component still abstains.
+    assert [230-x0, 210-y0] not in expected.tolist()
+    diagnostic = client.requests[1]['kwargs']['annotation_diagnostic']
+    assert diagnostic.rejected_pixels == tuple(map(tuple, expected))
+    diagnostic.validate_source(client.requests[1]['obs'])
+    assert all(np.array_equal(array, saved) for array, saved in zip(arrays, before))
+    assert all(attempt.log['raw_annotation'] == raw for attempt, raw in zip(result.attempts, client.replies))
+
+
+def test_multiple_failure_samples_prioritize_real_geometry_and_share_twelve_point_cap():
+    obs, reference, _ = source_scene()
+    crop = crop_observation(obs, reference)
+    source_reply = crop.restore_decision(reply(crop.observation, 'left_bad'))
+    outside_a = [[240+x, 220] for x in range(8)]
+    outside_b = [[247+x, 220] for x in range(8)]  # One duplicate across failures.
+    diagnostics = {'frame_id': obs.frame_id, 'camera_id': obs.camera_id, 'abstentions': [
+        {'failure': 'invalid_explicit_seed', 'seed_indices': [1], 'reasons': ['outside_region_or_hole']},
+        {'failure': 'component_outside_fixed_envelope', 'seed_indices': [0],
+         'rejected_pixels_xy': outside_a, 'rejected_pixel_count': 20},
+        {'failure': 'component_outside_fixed_envelope', 'seed_indices': [0],
+         'rejected_pixels_xy': outside_b, 'rejected_pixel_count': 24}]}
+    before = copy.deepcopy(diagnostics)
+    raw_before = source_reply.model_dump()
+    feedback = _correction_feedback(crop, diagnostics, source_reply)
+    x0, y0, _, _ = crop.bounds_xyxy
+    expected = (np.array([[240+x, 220] for x in range(12)]) - [x0, y0]).tolist()
+    assert [sample['pixel'] for sample in feedback['rejected_samples']] == expected
+    assert all(sample['sample_kind'] == 'geometry_outlier' for sample in feedback['rejected_samples'])
+    assert feedback['failures'][0]['rejected_seed_pixels']  # Invalid seed remains in text.
+    assert feedback['failures'][1]['rejected_seed_pixels'] == []
+    assert feedback['failures'][1]['component_seed_pixels']
+    assert diagnostics == before and source_reply.model_dump() == raw_before
+
+
+def test_seed_can_also_be_an_actual_outlier_without_conflicting_attribution():
+    obs, reference, _ = source_scene()
+    crop = crop_observation(obs, reference)
+    source_reply = crop.restore_decision(reply(crop.observation, 'good'))
+    seed = pixels(source_reply.groundings[1].points, obs.depth.shape)[0].tolist()
+    diagnostics = {'frame_id': obs.frame_id, 'camera_id': obs.camera_id, 'abstentions': [
+        {'failure': 'component_outside_fixed_envelope', 'seed_indices': [0],
+         'rejected_pixels_xy': [seed], 'rejected_pixel_count': 1}]}
+    feedback = _correction_feedback(crop, diagnostics, source_reply)
+    failure = feedback['failures'][0]
+    assert failure['component_seed_pixels'] == failure['rejected_geometry_pixels']
+    assert 'does not classify' in failure['component_seed_scope']
+    assert feedback['rejected_samples'][0]['sample_kind'] == 'geometry_outlier'
+
+
+@pytest.mark.parametrize('fault', ['frame', 'camera', 'outside_crop'])
+def test_outlier_feedback_rejects_wrong_source_or_coordinates_without_clipping(fault):
+    obs, reference, _ = source_scene()
+    crop = crop_observation(obs, reference)
+    source_reply = crop.restore_decision(reply(crop.observation, 'good'))
+    diagnostics = {'frame_id': obs.frame_id, 'camera_id': obs.camera_id,
+        'failure': 'component_outside_fixed_envelope', 'rejected_pixels_xy': [[240, 220]],
+        'rejected_pixel_count': 1}
+    if fault == 'frame': diagnostics['frame_id'] += 1
+    elif fault == 'camera': diagnostics['camera_id'] = 'other_camera'
+    else: diagnostics['rejected_pixels_xy'] = [[crop.bounds_xyxy[0]-1, crop.bounds_xyxy[1]]]
+    before = copy.deepcopy(diagnostics)
+    with pytest.raises(ValueError):
+        _correction_feedback(crop, diagnostics, source_reply)
+    assert diagnostics == before

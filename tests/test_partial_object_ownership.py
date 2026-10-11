@@ -71,20 +71,39 @@ def test_partial_needs_four_anchors_per_component_not_borrowed_global_anchors():
     assert result.report['abstentions'][0]['original_anchor_pixels'] == 1
 
 
-def test_out_of_envelope_tail_abstains_entire_component_without_clipping():
-    obs, _, mask, reference = scene(end=40)
+@pytest.mark.parametrize('end', [40, 44])
+def test_out_of_envelope_tail_abstains_entire_component_without_clipping(end):
+    obs, _, mask, reference = scene(end=end)
     depth = obs.depth.copy(); depth[12:14, 2:4] = 1.
     obs = replace(obs, depth=depth)
     mask[12:14, 2:4] = True
     reference = np.vstack([reference, [[x*.001, y*.001, 1.] for y in (12, 13) for x in (2, 3)]])
-    result = partial(obs, annotation(obs, mask, seeds=((2, 6), (2, 12))), reference)
+    decision = annotation(obs, mask, seeds=((2, 6), (2, 12)))
+    arrays = [obs.rgb, obs.depth, obs.K, obs.T_wc, reference, mask]
+    before = [array.copy() for array in arrays]
+    before_decision = decision.model_dump()
+    with pytest.raises(ObjectOwnershipError) as caught:
+        resolve(obs, decision, reference)
+    strict = caught.value.diagnostics
+    result = partial(obs, decision, reference)
     assert result.object_mask.sum() == 4
     assert not result.object_mask[6:10].any()
     item = result.report['abstentions'][0]
     assert item['failure'] == 'component_outside_fixed_envelope'
-    assert item['outside_fixed_envelope_pixels'] == 4
-    assert len(item['source_pixels_xy']) == 152
+    assert item['outside_fixed_envelope_pixels'] == item['rejected_pixel_count'] == 4*(end-39)
+    assert len(item['source_pixels_xy']) == 4*(end-2)
+    # Diagnostics preserve exactly the strict resolver's real outliers, with
+    # a bounded sample and an untruncated count. The legal seed is not one.
+    assert item['rejected_pixels_xy'] == strict['rejected_pixels_xy']
+    assert item['rejected_pixel_count'] == strict['rejected_pixel_count']
+    assert len(item['rejected_pixels_xy']) == min(12, 4*(end-39))
+    assert all(39 <= x < end and 6 <= y < 10 for x, y in item['rejected_pixels_xy'])
+    assert [2, 6] not in item['rejected_pixels_xy']
+    assert result.abstained_source_pixels_xy.shape == (4*(end-2), 2)
     assert not source_endpoint_retirement_mask(result.abstained_source_points, result, obs).any()
+    assert all(np.array_equal(array, saved) for array, saved in zip(arrays, before))
+    assert decision.model_dump() == before_decision
+    with pytest.raises(ValueError): result.object_mask[6, 2] = True
 
 
 @pytest.mark.parametrize('fault', ['support', 'self', 'negative', 'hole', 'invalid_depth'])

@@ -256,6 +256,13 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
             item.update(failure=reasons[0], reasons=reasons,
                 outside_fixed_envelope_pixels=int(outside.sum()),
                 source_pixels_xy=component_yx[:, ::-1].tolist())
+            if outside.any():
+                # Diagnose the actual outlying depth pixels, not the valid
+                # membership seed that selected this entire failed component.
+                # Sampling this report never clips the component or changes
+                # its full abstention/retention mask.
+                item.update(rejected_pixel_count=int(outside.sum()),
+                    rejected_pixels_xy=component_yx[outside][:12, ::-1].tolist())
             abstentions.append(item)
             abstained[component_yx[:, 0], component_yx[:, 1]] = True
             continue

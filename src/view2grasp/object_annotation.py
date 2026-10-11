@@ -67,36 +67,58 @@ def _correction_feedback(crop, diagnostics, source_reply):
     seeds = [p for g in source_reply.groundings if g.role == 'object' and g.kind == 'points'
              for p in g.points]
     seed_pixels = pixels(seeds, crop.source_shape).reshape(-1, 2)
-    samples = []
+    sample_candidates = []
     entries = []
-    seen = set()
+    def localized(source_pixel):
+        local = np.asarray(source_pixel, dtype=int) - offset
+        if not (0 <= local[0] < w and 0 <= local[1] < h):
+            raise ValueError('object annotation rejected pixel lies outside the supplied crop')
+        return {'pixel': local.tolist(), 'normalized': (local / [w-1, h-1]).tolist()}
+
     for failure in failures:
         reasons = failure.get('reasons') or [failure.get('failure', 'geometry_rejection')]
         entry = {key: copy.deepcopy(failure[key]) for key in
             ('failure', 'seed_indices', 'pixels', 'component_pixels', 'original_anchor_pixels',
              'outside_fixed_envelope_pixels', 'rejected_pixel_count', 'anchor_pixels') if key in failure}
         entry['reasons'] = list(reasons)
-        # Component failures identify the model's actual seed(s), not the full
-        # component silhouette or another desired collision endpoint. Strict
-        # envelope errors can also provide their real rejected pixel samples.
-        rejected = [seed_pixels[i].tolist() for i in failure.get('seed_indices', [])]
-        if not rejected and 'seed_pixel' in failure:
-            rejected = [failure['seed_pixel']]
-        if not rejected:
-            rejected = failure.get('rejected_pixels_xy', [])
+        component_seeds = [seed_pixels[i].tolist() for i in failure.get('seed_indices', [])]
+        if not component_seeds and 'seed_pixel' in failure:
+            component_seeds = [failure['seed_pixel']]
+        outside_component = 'component_outside_fixed_envelope' in reasons
+        invalid_seed = failure.get('failure') == 'invalid_explicit_seed'
         entry['rejected_seed_pixels'] = []
-        for source_pixel in rejected:
-            local = np.asarray(source_pixel, dtype=int) - offset
-            if not (0 <= local[0] < w and 0 <= local[1] < h):
-                raise ValueError('object annotation rejected pixel lies outside the supplied crop')
-            pixel = local.tolist()
-            normalized = (local / [w-1, h-1]).tolist()
-            entry['rejected_seed_pixels'].append({'pixel': pixel, 'normalized': normalized})
-            key = tuple(pixel)
-            if key not in seen and len(samples) < 12:
-                samples.append({'pixel': pixel, 'normalized': normalized, 'reasons': list(reasons)})
-                seen.add(key)
+        if component_seeds:
+            location_key = 'rejected_seed_pixels' if invalid_seed else 'component_seed_pixels'
+            entry[location_key] = [localized(pixel) for pixel in component_seeds]
+            if not invalid_seed:
+                entry['component_seed_scope'] = (
+                    'These region/depth-valid seeds select a rejected component. '
+                    'This list alone does not classify them as inside or outside the fixed envelope; '
+                    'rejected_geometry_pixels identifies actual measured outlier samples.')
+        geometry_pixels = failure.get('rejected_pixels_xy', [])
+        entry['rejected_geometry_pixels'] = [localized(pixel) for pixel in geometry_pixels]
+        for location in entry['rejected_geometry_pixels']:
+            sample_candidates.append((0, {**location, 'sample_kind': 'geometry_outlier',
+                'reasons': ['component_outside_fixed_envelope'] if outside_component else list(reasons)}))
+        # An envelope violation belongs to its measured outliers, not every
+        # in-bounds seed. Keep those seeds as attribution text only, including
+        # for historical reports that did not preserve the actual outliers.
+        if not outside_component:
+            for source_pixel in component_seeds:
+                sample_candidates.append((1 if invalid_seed else 2,
+                    {**localized(source_pixel), 'sample_kind': 'invalid_seed' if invalid_seed else 'component_seed',
+                        'reasons': list(reasons)}))
         entries.append(entry)
+    samples = []
+    seen = set()
+    # Actual outliers take priority over seed attribution across ALL failures.
+    # Stable ordering and deduplication preserve the shared 12-point image cap.
+    for _, sample in sorted(sample_candidates, key=lambda item: item[0]):
+        key = tuple(sample['pixel'])
+        if key not in seen:
+            seen.add(key)
+            if len(samples) < 12:
+                samples.append(sample)
     review = []
     for component in diagnostics.get('unresolved_measured_components', []):
         bounds = np.asarray(component['bbox_xyxy'])
@@ -224,6 +246,9 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
             'positive seeds. Do not mechanically move or just delete rejected clicks. The second '
             'image marks actual rejected pixels and gives a coordinate grid; it provides no object '
             'labels or desired boundaries. Both images share normalized pixel-center coordinates. '
+            'For component_outside_fixed_envelope, rejected_geometry_pixels are the actual '
+            'outlying depth samples; component_seed_pixels only identify the seeds that selected '
+            'that failed component, not whether those seed pixels are inside or outside the envelope. '
             'If geometry_diagnostics lists unresolved_measured_components, inspect those areas '
             'independently in the unmarked image. They are measured pieces inside your own previous '
             'region without a positive seed, not confirmed target material. They may instead belong '
