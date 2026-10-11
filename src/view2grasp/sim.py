@@ -25,7 +25,9 @@ INSTRUCTIONS = {
             "reason; looking directly along the handle's radial direction is not broadside. Use elevation about -10 to 30 degrees. "
             "Represent the mug and open aperture with an object proposal (a polygon hole may exclude the aperture). "
             "The grasp_part must isolate the straight outer vertical handle bar, excluding the cup body and both junctions. "
-            "Put any contact point at the vertical midpoint of that straight segment, on solid material. Leave clearance "
+            "For this thin handle, prefer a tight grasp_part REGION around the vertical midpoint of the straight bar. "
+            "Omit optional grasp_contact and point fields so calibrated depth can select an interior material point "
+            "inside that region; do not reuse coordinates from earlier images. Leave clearance "
             "above and below for the complete fingers and hand, not only the fingertip contact."),
     "occluded": "Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles.",
 }
