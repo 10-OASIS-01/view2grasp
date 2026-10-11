@@ -245,6 +245,13 @@ class GroundingResolver:
         # An interior valid pixel initializes connectivity when only a mask/box was supplied.
         distance = cv2.distanceTransform(part_mask.astype(np.uint8),cv2.DIST_L2,3)
         y,x = np.unravel_index(distance.argmax(),distance.shape)
+        if not part_seeds:
+            # A narrow bar has many equally interior pixels. Row-major argmax
+            # biases contact toward its top/left end; center only this exact
+            # maximum-distance set, preserving all region and depth filtering.
+            maxima=np.argwhere(distance==distance.max())
+            center=np.argwhere(part_mask).mean(axis=0)
+            y,x=maxima[np.argmin(np.sum((maxima-center)**2,axis=1))]
         h,w = obs.depth.shape
         contact = contact_seeds[0] if contact_seeds else (x/(w-1),y/(h-1))
         object_mask = region(object_proposals,[contact])
