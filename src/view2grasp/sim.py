@@ -21,8 +21,12 @@ INSTRUCTIONS = {
             "Use one active broadside observation, then ground by observation 2 if solid handle material is visible. "
             "From the initial overhead image, estimate the handle's radial direction and choose a view about 90 degrees "
             "to either side of it so the aperture is broadside, preferring the solution on the world -X / azimuth ±180 side "
-            "where the Panda base can reach. Use elevation about -10 to 30 degrees. Represent the open aperture as a polygon "
-            "hole and put any contact point on the outer vertical handle bar."),
+            "where the Panda base can reach. State the image-based radial estimate and the derived broadside angle in your "
+            "reason; looking directly along the handle's radial direction is not broadside. Use elevation about -10 to 30 degrees. "
+            "Represent the mug and open aperture with an object proposal (a polygon hole may exclude the aperture). "
+            "The grasp_part must isolate the straight outer vertical handle bar, excluding the cup body and both junctions. "
+            "Put any contact point at the vertical midpoint of that straight segment, on solid material. Leave clearance "
+            "above and below for the complete fingers and hand, not only the fingertip contact."),
     "occluded": "Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles.",
 }
 
