@@ -102,7 +102,46 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 history.append({'feedback':
                     'No coverage-only view is prescribed for handle grounding. Infer the handle plane from this image and choose the reachable -X-side broadside described in the task.'})
             record.planning_seconds+=time.monotonic()-timer
-        pending_decision=None;grounding_repairs={}
+        pending_decision=None;grounding_repairs={};contact_association_frames=set()
+        def reassociate_contacts(observation,grounded_decision,original_object,original_part,target,target_part):
+            # One annotation request per acquired frame, only before a bounded
+            # recovery replan. This does not move a camera or select a new ray.
+            if task!='occluded' or observation.frame_id in contact_association_frames:
+                return target,target_part
+            contact_association_frames.add(observation.frame_id)
+            identities={g.target_id for g in grounded_decision.groundings
+                        if g.role in ('object','grasp_part','grasp_contact')}
+            identity=next(iter(identities)) if identities else 'target'
+            history.append({'contact_reassociation':{
+                'purpose':'Annotate newly visible surfaces of the SAME static object and permitted grasp part; keep the stored grasp ray and candidates.',
+                'frame_id':observation.frame_id,'camera_id':observation.camera_id,'target_id':identity,
+                'original_grounding_frame':grounded_decision.frame_id,
+                'original_part':grounded_decision.part or (
+                    'the originally requested grasp part' if any(g.role=='grasp_part' for g in grounded_decision.groundings)
+                    else 'the whole target object'),
+                'instructions':'Return observe with explicit tight object AND grasp_part polygon regions for THIS image, using the same target_id. Exclude neighboring objects, support, robot, and holes. Do not substitute a box or point. This is annotation only: keep the current azimuth/elevation/distance; no camera command from this reply will execute. If the part cannot be identified, omit the regions and contact permission will remain unchanged.'}})
+            try:
+                annotation=vlm.decide(observation,INSTRUCTIONS[task],history,force_observe=True)
+                event('contact_association_decision',preserved_grounding_frame=grounded_decision.frame_id,
+                    **annotation.model_dump())
+                association=resolver.reassociate_contact(observation,annotation,original_object,original_part,
+                    identity,map_.table_z,robot_depths.get(observation.frame_id))
+            except (ValueError,RuntimeError) as exc:
+                event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc))
+                history.append({'feedback':'Contact reassociation rejected; previous contact permission and original grasp ray remain unchanged: '+str(exc)})
+                return target,target_part
+            report={**association.report,'preserved_grounding_frame':grounded_decision.frame_id}
+            np.savez_compressed(out/f'contact_association_{observation.frame_id:03d}.npz',
+                object_mask=association.object_mask,part_mask=association.part_mask,
+                object_points=association.object_points,part_points=association.part_points)
+            (out/f'contact_association_{observation.frame_id:03d}.json').write_text(json.dumps(report,indent=2))
+            event('contact_association',**report)
+            # Keep measured points exactly: rounding representatives could
+            # discard the newly observed side endpoint needed by the map.
+            target=np.unique(np.vstack([target,association.object_points]),axis=0)
+            target_part=np.unique(np.vstack([target_part,association.part_points]),axis=0)
+            map_.set_target(target_part)
+            return target,target_part
         while record.observations<=pregrasp_limit and record.attempts<config.max_attempts:
             # Bounded development policy: a larger mug budget permits one
             # alternate semantic view if the first broadside is occluded. Keep
@@ -152,12 +191,15 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # click so both sides of a handle bar can be legitimate finger
                 # contacts. This remains image/depth based and never uses IDs.
                 anchor=candidates[0].surface_point
-                local_part=target[np.linalg.norm(target-anchor,axis=1)<.04]
+                explicit_part=any(g.role=='grasp_part' for g in decision.groundings)
+                local_part=(np.empty((0,3)) if explicit_part else
+                    target[np.linalg.norm(target-anchor,axis=1)<.04])
                 if len(local_part):
                     target_part=np.vstack([target_part,local_part])
                     _,part_unique=np.unique(np.round(target_part/map_.resolution).astype(np.int32),axis=0,return_index=True)
                     target_part=target_part[part_unique]
                 map_.set_target(target_part)
+                original_object=target.copy();original_part=target_part.copy()
                 np.savez_compressed(out/f"candidates_{obs.frame_id:03d}.npz",positions=np.array([g.position for g in candidates]),
                     rotations=np.array([g.rotation for g in candidates]),widths=np.array([g.width for g in candidates]),
                     ray_angles=np.array([g.ray_angle for g in candidates]),target=target,
@@ -236,7 +278,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         history.append({'view':obs.view,'decision':next_decision.model_dump(),
                             'feedback':'completed one mapping-only recovery observation; choose an unvisited remaining coverage view'})
                         obs=observe();recovered=True
-                        newly_seen=resolver.track(obs,target,robot_depths.get(obs.frame_id)) if 'target' in locals() else None
+                        newly_seen=(resolver.track(obs,target,robot_depths.get(obs.frame_id))
+                            if task!='occluded' and 'target' in locals() else None)
                         if newly_seen is not None:
                             combined=np.vstack([target,newly_seen])
                             _,unique=np.unique(np.round(combined/map_.resolution).astype(np.int32),axis=0,return_index=True)
@@ -250,6 +293,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # The scene has not moved. Preserve the VLM-selected point,
                     # camera ray and candidates; the extra view exists to reveal
                     # planning space, not silently change the grasp direction.
+                    target,target_part=reassociate_contacts(obs,decision,original_object,original_part,target,target_part)
                     retry_timer=time.monotonic()
                     # Reuse the exact redundant-IK and RRT samples whose rejected
                     # workspace points produced the recovery advice. Otherwise a
@@ -292,11 +336,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                 history.append({'view':obs.view,'decision':residual.model_dump(),
                                     'feedback':'completed residual mapping observation; preserving the original grasp ray'})
                                 obs=observe()
-                                newly_seen=resolver.track(obs,target,robot_depths.get(obs.frame_id))
+                                newly_seen=(resolver.track(obs,target,robot_depths.get(obs.frame_id))
+                                    if task!='occluded' else None)
                                 if newly_seen is not None:
                                     combined=np.vstack([target,newly_seen])
                                     _,unique=np.unique(np.round(combined/map_.resolution).astype(np.int32),axis=0,return_index=True)
                                     target=combined[unique]
+                                target,target_part=reassociate_contacts(obs,decision,original_object,original_part,target,target_part)
                                 residual_timer=time.monotonic()
                                 planner.rng.bit_generator.state=copy.deepcopy(planning_rng_state)
                                 chosen=planner.choose(obs.q,candidates,max_candidates=config.max_candidates,

@@ -172,6 +172,15 @@ class GroundingResult:
     report: dict
 
 
+@dataclass
+class ContactAssociation:
+    object_mask: np.ndarray
+    part_mask: np.ndarray
+    object_points: np.ndarray
+    part_points: np.ndarray
+    report: dict
+
+
 class GroundingResolver:
     def __init__(self, segmenter=None, sam_unavailable_reason=None):
         self.segmenter = segmenter
@@ -266,6 +275,85 @@ class GroundingResolver:
             return self.segmenter.segment(obs,proposal)
         try:return track_surface(obs,reference,robot_depth,segment=segment if self.segmenter else None,support_z=support_z)
         finally:self.seconds+=time.monotonic()-start
+
+    def reassociate_contact(self,obs,decision,reference_object,reference_part,target_id,
+                            support_z,robot_depth=None):
+        start=time.monotonic()
+        try:return self._reassociate_contact(obs,decision,reference_object,reference_part,target_id,
+                                            support_z,robot_depth)
+        finally:self.seconds+=time.monotonic()-start
+
+    def _reassociate_contact(self,obs,decision,reference_object,reference_part,target_id,
+                             support_z,robot_depth=None):
+        """Validate fresh semantic regions without selecting a new grasp ray.
+
+        Proximity alone cannot authorize contact: a 10 mm neighboring object can
+        belong to the tracker's depth component. Require explicit current-frame
+        object AND part polygons/masks, with measured overlap to the original
+        surfaces. A box or point is insufficient for this permission change.
+        """
+        from .geometry import unproject
+        from scipy.spatial import cKDTree
+        if decision.frame_id!=obs.frame_id or decision.camera_id!=obs.camera_id:
+            raise ValueError('contact association requires the current frame and camera')
+        groups={role:[g for g in decision.groundings if g.role==role]
+                for role in ('object','grasp_part')}
+        masks={}
+        for role,proposals in groups.items():
+            if not proposals:raise ValueError('contact association requires explicit object and grasp_part regions')
+            mask=np.ones(obs.depth.shape,dtype=bool)
+            for proposal in proposals:
+                if proposal.target_id!=target_id or proposal.source!='vlm':
+                    raise ValueError('contact association target identity or semantic source differs')
+                if proposal.kind not in ('polygon','mask'):
+                    raise ValueError('contact association requires tight polygon or mask regions, not boxes or points')
+                mask &= proposal_mask(proposal,obs)
+                for x,y in pixels(proposal.negative_points,obs.depth.shape).reshape(-1,2):
+                    mask[max(0,y-2):y+3,max(0,x-2):x+3]=False
+            masks[role]=mask
+        if np.any(masks['grasp_part'] & ~masks['object']):
+            raise ValueError('contact part must remain inside the explicit object region')
+        h,w=obs.depth.shape;v,u=np.mgrid[:h,:w]
+        xyz=unproject(np.stack([u,v],-1),obs.depth,obs.K,obs.T_wc)
+        valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)&np.isfinite(xyz).all(axis=2)
+        valid &= xyz[:,:,2]>support_z+.006
+        if robot_depth is not None:valid &= np.abs(obs.depth-robot_depth)>.003
+        clouds={};overlap={}
+        for role,reference in (('object',reference_object),('grasp_part',reference_part)):
+            reference=np.asarray(reference)
+            if len(reference)<4 or not np.isfinite(reference).all():
+                raise ValueError('contact association lacks an original observed reference')
+            masks[role] &= valid
+            points=xyz[masks[role]]
+            if len(points)<4:raise ValueError('contact association has insufficient filtered depth')
+            distances=cKDTree(reference).query(points)[0]
+            # Fixed source references prevent incremental association drift. The
+            # 4 mm overlap is tighter than the 10 mm independent-neighbor case;
+            # 35 mm bounds new visible faces, not collision/contact tolerances.
+            anchors=distances<.004
+            if anchors.sum()<4 or np.max(distances)>.035:
+                raise ValueError('contact association is inconsistent with the original observed '+role)
+            # Each disconnected semantic island needs its own old-surface
+            # evidence; an unrelated island cannot borrow another's overlap.
+            anchor_mask=np.zeros((h,w),dtype=bool);anchor_mask[masks[role]]=anchors
+            unseen=masks[role].copy()
+            for y,x in np.argwhere(masks[role]):
+                if not unseen[y,x]:continue
+                unseen[y,x]=False;stack=[(y,x)];component_anchors=0
+                while stack:
+                    yy,xx=stack.pop();component_anchors+=int(anchor_mask[yy,xx])
+                    for ny,nx in ((yy-1,xx),(yy+1,xx),(yy,xx-1),(yy,xx+1)):
+                        if (0<=ny<h and 0<=nx<w and unseen[ny,nx] and
+                                np.linalg.norm(xyz[ny,nx]-xyz[yy,xx])<=.006):
+                            unseen[ny,nx]=False;stack.append((ny,nx))
+                if not component_anchors:
+                    raise ValueError('contact association contains an unanchored semantic surface component')
+            clouds[role]=points;overlap[role]=int(anchors.sum())
+        return ContactAssociation(masks['object'],masks['grasp_part'],clouds['object'],clouds['grasp_part'],
+            {'frame_id':obs.frame_id,'camera_id':obs.camera_id,'target_id':target_id,
+             'source':'explicit_current_frame_semantics+rgbd','original_surface_overlap_pixels':overlap,
+             'object_pixels':len(clouds['object']),'part_pixels':len(clouds['grasp_part']),
+             'grasp_ray_changed':False})
 
 
 def lift_ground_path(obs, proposal, floor_z, tolerance=.06):
