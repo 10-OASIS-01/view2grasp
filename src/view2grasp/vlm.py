@@ -103,7 +103,11 @@ and grasp_part regions and OMIT optional grasp_contact / point coordinates: a
 coarsely rounded click can move the approach toward the face edge. Give a point
 only when a particular visible contact location is needed and can be located
 precisely. Explicit points remain binding and are never silently recentered. For a
-handle expose both the material and aperture; use negative points/holes to
+whole object with visible surfaces separated by occlusion or depth gaps, add
+kind="points", role="object" membership seeds on those visible surfaces inside
+its object region. These are NOT grasp_contact points: they identify object
+material for collision geometry and do not permit finger contact there.
+For a handle expose both the material and aperture; use negative points/holes to
 exclude background. Grasp approach stays within 15 degrees of the camera ray
 to the resolved contact. Choose a view giving reachable approach and clearance.
 Place: ground a support region large enough for the object and free of clutter.
@@ -345,6 +349,7 @@ class VLM:
             user['allowed_actions']=['grasp','abort']
             user['response_contract']+=(' This is a before-ray grounding refinement. Return grasp with fresh explicit '
                 'object AND grasp_part regions, or abort. Every coordinate is normalized to this supplied image_size. '
+                'Also provide explicit kind=points, role=object membership seeds on visible object material. '
                 'Use derived_image_context for its bounds. Do not return observe or a camera command.')
             user['grounding_refinement_context']={
                 'purpose':'before_ray_same_frame_grasp_refinement','frame_id':obs.frame_id,
@@ -356,6 +361,12 @@ class VLM:
                     'For a mug, prefer ONE tight object BOX around the complete visible mug body AND handle together. '
                     'The object region must include the chosen handle material, not only the cup body; '
                     'do not copy the small grasp_part region as the object. A box needs no aperture hole. '
+                    'Alongside that region, provide a SEPARATE kind=points, role=object proposal with the SAME '
+                    'target_id: place membership seeds well inside each clearly visible component of the mug body '
+                    'and handle, including body material separated from the handle by robot occlusion. '
+                    'Polygon vertices are boundaries, not membership seeds. Never seed the aperture, robot, '
+                    'table or an uncertain surface. Object seeds retain measured body geometry for collisions; '
+                    'they do not choose the contact or expand the permitted grasp_part. '
                     'Use a polygon or mask only when you can trace its complete visible extent reliably; '
                     'any polygon hole must lie inside its outer boundary and must not remove the chosen handle material. '
                     'Provide a SEPARATE tight visible grasp_part region inside the object region: '
@@ -394,6 +405,10 @@ class VLM:
                     'This CURRENT image was actually acquired from a different view during mapping. '
                     'If the requested part and clearance are visible, propose a NEW grasp with fresh explicit object '
                     'AND grasp_part regions in this image; the planner will derive a NEW camera-to-contact ray. '
+                    'Also provide explicit kind=points, role=object membership seeds inside each clearly visible '
+                    'object component, including the mug body and handle. Use the same target_id and enclose '
+                    'these seeds in the complete visible object region. These membership seeds are not contact '
+                    'points and do not expand the separate permitted grasp_part. Do not seed uncertain pixels. '
                     'Old preserve-ray/mapping-only instructions and the initial-grounding deadline do not apply '
                     'to this new transaction. Do not reuse old coordinates, candidate IDs, or target masks. '
                     'If this image is unsuitable, choose observe or abort. Revisiting an earlier view is allowed; '
@@ -540,6 +555,9 @@ class VLM:
                     roles={g.role for g in decision.groundings if g.kind in ('box','polygon','mask')}
                     if not {'object','grasp_part'}<=roles:
                         raise ValueError('grounding refinement requires fresh explicit object AND grasp_part regions; legacy points or candidate IDs are insufficient')
+                if (grounding_refinement is not None or current_frame_reselection is not None) and decision.action=='grasp':
+                    if not any(g.role=='object' and g.kind=='points' and g.points for g in decision.groundings):
+                        raise ValueError('fresh whole-object grounding requires explicit kind=points, role=object membership seeds on visible material inside the object region; polygon vertices and grasp_contact points do not qualify')
                 if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
                 if force_observe and decision.action != "observe":
                     purpose=observe_purpose.replace('_',' ')

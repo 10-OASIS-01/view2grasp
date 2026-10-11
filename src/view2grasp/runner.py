@@ -5,7 +5,7 @@ import zipfile
 import numpy as np
 from .sim import Simulator,INSTRUCTIONS
 from .types import EpisodeRecord
-from .geometry import cloud,fit_table,grasp_candidates,pixel_point,project,unproject,part_cloud
+from .geometry import cloud,fit_table,grasp_candidates,pixel_point,project,unproject,part_cloud,has_explicit_object_seeds
 from .mapping import DepthMap,UNKNOWN
 from .planning import RobotModel,Planner,time_parameterize
 from .vlm import VLM
@@ -413,7 +413,13 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 # contacts. This remains image/depth based and never uses IDs.
                 anchor=candidates[0].surface_point
                 explicit_part=any(g.role=='grasp_part' for g in decision.groundings)
-                local_part=(np.empty((0,3)) if explicit_part else
+                # Explicit object seeds may add separate body surfaces to the
+                # collision envelope. They are not grasp-part/contact seeds.
+                # The ownership path likewise keeps its measured semantic part
+                # separate from later whole-object tracking and registration.
+                semantic_contact_only=(has_explicit_object_seeds(decision) or
+                    (task=='mug' and config.source_object_ownership))
+                local_part=(np.empty((0,3)) if explicit_part or semantic_contact_only else
                     target[np.linalg.norm(target-anchor,axis=1)<.04])
                 if len(local_part):
                     target_part=np.vstack([target_part,local_part])
@@ -952,9 +958,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # Different views expose different surfaces: a median shift
                     # is not object motion. Reassociate the contact neighborhood
                     # directly in the shared calibrated world frame.
-                    center=grasp.grasp_center
-                    current_part=current_target[np.linalg.norm(current_target-center,axis=1)<.04]
-                    if len(current_part):target_part=current_part
+                    if not semantic_contact_only:
+                        center=grasp.grasp_center
+                        current_part=current_target[np.linalg.norm(current_target-center,axis=1)<.04]
+                        if len(current_part):target_part=current_part
                     # The first post-close RGB-D cloud supersedes the stale
                     # pre-close payload. Subsequent views are already calibrated
                     # in the same world frame and are fused without a second
@@ -1145,7 +1152,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     held_p,held_R=robot.pose(sim.q)
                     planner.add_observed_payload(tracked,held_p,held_R)
                 map_.remove_target_endpoints(tracked)
-                map_.set_target(tracked_part if task=='occluded' else tracked)
+                if task=='occluded':map_.set_target(tracked_part)
+                elif not semantic_contact_only:map_.set_target(tracked)
             held_p,held_R=robot.pose(sim.q)
             held_estimate=planner.attached@held_R.T+held_p
             # A predicted attachment pose is not observed object membership.

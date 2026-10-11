@@ -26,7 +26,9 @@ def grasp(obs):
     return {'action':'grasp','frame_id':obs.frame_id,'camera_id':obs.camera_id,
         'groundings':[{'kind':'polygon','role':role,'frame_id':obs.frame_id,
             'camera_id':obs.camera_id,'source':'vlm','target_id':'mug',
-            'points':[[.2,.2],[.4,.2],[.4,.4],[.2,.4]]} for role in ('object','grasp_part')]}
+            'points':[[.2,.2],[.4,.2],[.4,.4],[.2,.4]]} for role in ('object','grasp_part')]+[
+                {'kind':'points','role':'object','frame_id':obs.frame_id,'camera_id':obs.camera_id,
+                 'source':'vlm','target_id':'mug','points':[[.3,.3]]}]}
 
 
 def client_with_replies(tmp_path,replies,requests):
@@ -109,7 +111,7 @@ def test_full_acquired_refinement_has_identity_coordinate_contract(tmp_path):
     assert context['derived_image_context']['bounds_xyxy']==[0,0,32,32]
 
 
-@pytest.mark.parametrize('fault',['frame','camera','source','points_only','candidate_only'])
+@pytest.mark.parametrize('fault',['frame','camera','source','points_only','candidate_only','no_object_seeds','contact_only'])
 def test_refinement_repairs_wrong_source_or_nonregion_proposals(tmp_path,fault):
     obs=observation();evidence=provenance(obs);requests=[];invalid=grasp(obs)
     if fault=='frame':invalid['frame_id']=99
@@ -117,6 +119,8 @@ def test_refinement_repairs_wrong_source_or_nonregion_proposals(tmp_path,fault):
     elif fault=='source':invalid['groundings'][0]['source']='rgbd'
     elif fault=='points_only':
         for g in invalid['groundings']:g.update(kind='points',points=[[.3,.3]])
+    elif fault=='no_object_seeds':invalid['groundings'].pop()
+    elif fault=='contact_only':invalid['groundings'][-1]['role']='grasp_contact'
     else:
         for g in invalid['groundings']:g.update(kind='candidate',candidate_id='old-target')
     client=client_with_replies(tmp_path,[invalid,grasp(obs)],requests)

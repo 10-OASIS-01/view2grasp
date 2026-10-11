@@ -67,9 +67,13 @@ class GroundingSeedError(ValueError):
     """Strict seed rejection with observation-only, serializable feedback."""
     def __init__(self,diagnostics):
         self.diagnostics=diagnostics
-        correction=('Correct the explicit seed, or omit optional contact points while still supplying valid object/part regions.'
-            if diagnostics['valid_candidate_pixels'] else
-            'Correct the proposed region or acquire another observation; no filtered pixels remain.')
+        if diagnostics.get('role')=='object' and diagnostics['valid_candidate_pixels']:
+            correction=('Correct the rejected object-membership seed or resolved contact and its object region. '
+                'All supplied seeds remain binding; none was dropped or moved.')
+        else:
+            correction=('Correct the explicit seed, or omit optional contact points while still supplying valid object/part regions.'
+                if diagnostics['valid_candidate_pixels'] else
+                'Correct the proposed region or acquire another observation; no filtered pixels remain.')
         super().__init__('grounding seed rejected: '+json.dumps(diagnostics,separators=(',',':'))+
             ' '+correction+' Candidate pixels are filtered depth only, not semantic correctness or graspability evidence.')
 
@@ -472,7 +476,16 @@ class GroundingResolver:
         if len(targets) != 1:
             raise ValueError("grasp must resolve exactly one associated target")
         groups = {role:[g for g in proposals if g.role==role] for role in ("object","grasp_part","grasp_contact")}
-        part_proposals = groups['grasp_part'] or groups['object'] or groups['grasp_contact']
+        object_seeds = [p for g in groups['object'] for p in g.points if g.kind != 'polygon']
+        if object_seeds:
+            # Membership cannot seed the grasp part, select contact, or prompt
+            # a part segmenter. Require independently supplied part/contact
+            # semantics, including when the object has no separate part box.
+            part_proposals = groups['grasp_part'] or groups['grasp_contact']
+            if not part_proposals:
+                raise ValueError('explicit object seeds require an independent grasp_part or grasp_contact')
+        else:
+            part_proposals = groups['grasp_part'] or groups['object'] or groups['grasp_contact']
         object_proposals = groups['object'] or part_proposals
         contact_seeds = [p for g in groups['grasp_contact'] for p in g.points]
         report = {"kinds":[g.kind for g in proposals],"source":"rgbd","sam_calls":0,
@@ -503,8 +516,29 @@ class GroundingResolver:
                 'basis':'unchanged_explicit_seed_policy'}
         h,w = obs.depth.shape
         contact = contact_seeds[0] if contact_seeds else (x/(w-1),y/(h-1))
-        object_mask = region(object_proposals,[contact])
-        part_mask &= object_mask
+        # Membership seeds may select separate measured surfaces of one object.
+        # Polygon vertices are boundaries, not membership seeds. Never promote
+        # part-only fallback proposals to explicit whole-object membership.
+        if object_seeds:
+            try:
+                object_mask = region(object_proposals,object_seeds+[contact])
+            except GroundingSeedError as exc:
+                diagnostics={**exc.diagnostics,'role':'object'}
+                diagnostics['rejected_seeds']=[{**sample,
+                    'seed_origin':('explicit_object' if sample['seed_index']<len(object_seeds) else 'resolved_contact')}
+                    for sample in exc.diagnostics['rejected_seeds']]
+                raise GroundingSeedError(diagnostics) from exc
+            # Object membership does not grant finger contact. Reuse the
+            # filtered union without another segmentation call and retain only
+            # the original contact-connected component for part permission.
+            contact_object_mask = depth_component(obs,object_mask,[contact],
+                support_z=support_z,robot_depth=robot_depth)
+            report.update(explicit_object_seed_components=True,
+                          explicit_object_seed_count=len(object_seeds))
+        else:
+            object_mask = region(object_proposals,[contact])
+            contact_object_mask = object_mask
+        part_mask &= contact_object_mask
         if not part_mask.any():
             raise ValueError("part and object segmentations do not agree")
         def box(mask):

@@ -15,10 +15,15 @@ def region(role,frame=1):
         target_id='mug',source='vlm',points=[[.2,.2],[.4,.2],[.4,.4],[.2,.4]])
 
 
+def object_seed():
+    return dict(kind='points',role='object',frame_id=1,camera_id='activeview',
+        target_id='mug',source='vlm',points=[[.3,.3]])
+
+
 def test_current_frame_reselection_demands_fresh_roles_and_rejects_stale_grounding(tmp_path):
     replies=[dict(action='grasp',frame_id=1,point=[.3,.3],bbox=[.2,.2,.4,.4],part_bbox=[.2,.2,.4,.4]),
         dict(action='grasp',frame_id=1,groundings=[region('object',0),region('grasp_part',0)]),
-        dict(action='grasp',frame_id=1,groundings=[region('object'),region('grasp_part')])]
+        dict(action='grasp',frame_id=1,groundings=[region('object'),region('grasp_part'),object_seed()])]
     requests=[]
     def handler(request):
         requests.append(json.loads(request.content))
@@ -42,6 +47,18 @@ def test_current_frame_reselection_demands_fresh_roles_and_rejects_stale_groundi
     first=json.loads((tmp_path/'call_000.json').read_text())
     assert 'fresh explicit object AND grasp_part' in first['error']
     assert json.loads((tmp_path/'call_001.json').read_text())['error'] is not None
+
+
+def test_reselection_does_not_treat_polygon_vertices_as_membership_seeds(tmp_path):
+    replies=[dict(action='grasp',frame_id=1,groundings=[region('object'),region('grasp_part')]),
+        dict(action='abort',frame_id=1)]
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(replies.pop(0))}}]})))
+    try:answer=client.decide(observation(),'Grasp the handle',[],current_frame_reselection={})
+    finally:client.client.close()
+    assert answer.action=='abort' and client.calls==2
+    assert 'object membership seeds' in json.loads((tmp_path/'call_000.json').read_text())['error']
 
 
 @pytest.mark.parametrize('action',['observe','abort'])
