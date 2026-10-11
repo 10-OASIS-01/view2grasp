@@ -220,6 +220,64 @@ def _contact_diagnostics(obs, role, failure, reference, reference_tree, proposed
     return report
 
 
+def _component_anchor_repairability(obs, xyz, valid, component_pixels, reference,
+                                    reference_object, support_z, source_supported,
+                                    semantic_exclusions):
+    """Diagnose a possibly truncated boundary without proposing a new mask.
+
+    The unchanged metric graph may reach an original anchor through measured
+    pixels outside the proposed polygon. That only justifies asking the VLM
+    to reinspect its boundary; those pixels have no semantic/contact authority.
+    Explicit negative points and polygon holes cannot provide such a bridge.
+    """
+    import hashlib
+    from scipy.spatial import cKDTree
+    reference = np.asarray(reference)
+    original = np.asarray(reference_object)
+    lo, hi = reference.min(0) - .035, reference.max(0) + .035
+    if source_supported:
+        lo = np.minimum(lo, np.r_[original[:, :2].min(0) - .004, support_z + .006])
+        hi = np.maximum(hi, np.r_[original[:, :2].max(0) + .004, original[:, 2].max()])
+    candidates = (valid & ~semantic_exclusions &
+        np.all((xyz >= lo) & (xyz <= hi), axis=2))
+    points = xyz[candidates]
+    distances = cKDTree(reference).query(points)[0]
+    eligible = distances <= .035
+    if source_supported:
+        eligible |= _supported_downward_points(points, original, support_z)[0]
+    allowed = np.zeros(valid.shape, dtype=bool)
+    allowed[candidates] = eligible
+    anchors = np.zeros(valid.shape, dtype=bool)
+    anchors[candidates] = (distances < .004) & eligible
+    reached = anchors.copy()
+    stack = [tuple(pixel) for pixel in np.argwhere(anchors)]
+    h, w = valid.shape
+    while stack:
+        y, x = stack.pop()
+        for yy, xx in ((y-1,x),(y+1,x),(y,x-1),(y,x+1)):
+            if (0 <= yy < h and 0 <= xx < w and allowed[yy,xx] and
+                    not reached[yy,xx] and np.linalg.norm(xyz[yy,xx]-xyz[y,x]) <= .006):
+                reached[yy,xx] = True
+                stack.append((yy,xx))
+    pixels_yx = np.asarray(component_pixels, dtype=int)
+    reachable = int(reached[pixels_yx[:,0], pixels_yx[:,1]].sum())
+    # Same image/reference/phase evidence is required when comparing repairs.
+    digest = hashlib.sha256()
+    for value in (obs.rgb, obs.depth, obs.K, obs.T_wc, valid, reference, original,
+                  np.asarray([support_z, float(source_supported)])):
+        array = np.ascontiguousarray(value)
+        digest.update(str((array.shape, array.dtype)).encode())
+        digest.update(array.tobytes())
+    return {'basis': 'observed_geometry_boundary_reinspection_only',
+        'evidence_sha256': digest.hexdigest(),
+        'component_pixels': len(pixels_yx), 'anchor_reachable_pixels': reachable,
+        'anchor_reachable_fraction': reachable / len(pixels_yx),
+        'eligible_observed_pixels': int(allowed.sum()),
+        'fixed_reference_anchor_pixels': int(anchors.sum()),
+        'grants_semantic_or_contact_permission': False,
+        'meaning': 'Possible boundary truncation, not a proposed region or proof of object identity.'}
+
+
 def depth_component(obs, allowed, seeds=(), negative_points=(), support_z=None, robot_depth=None):
     """4-connected RGB-D surface; invalid depth and depth jumps split components."""
     from .geometry import unproject
@@ -499,19 +557,24 @@ class GroundingResolver:
             raise ValueError('contact association requires the current frame and camera')
         groups={role:[g for g in decision.groundings if g.role==role]
                 for role in ('object','grasp_part')}
-        masks={}
+        masks={};semantic_exclusions={}
         for role,proposals in groups.items():
             if not proposals:raise ValueError('contact association requires explicit object and grasp_part regions')
             mask=np.ones(obs.depth.shape,dtype=bool)
+            excluded=np.zeros(obs.depth.shape,dtype=np.uint8)
             for proposal in proposals:
                 if proposal.target_id!=target_id or proposal.source!='vlm':
                     raise ValueError('contact association target identity or semantic source differs')
                 if proposal.kind not in ('polygon','mask'):
                     raise ValueError('contact association requires tight polygon or mask regions, not boxes or points')
                 mask &= proposal_mask(proposal,obs)
+                for ring in proposal.holes:
+                    cv2.fillPoly(excluded,[pixels(ring,obs.depth.shape)],1)
                 for x,y in pixels(proposal.negative_points,obs.depth.shape).reshape(-1,2):
                     mask[max(0,y-2):y+3,max(0,x-2):x+3]=False
+                    excluded[max(0,y-2):y+3,max(0,x-2):x+3]=1
             masks[role]=mask
+            semantic_exclusions[role]=excluded.astype(bool)
         if np.any(masks['grasp_part'] & ~masks['object']):
             raise ContactAssociationError('contact part must remain inside the explicit object region',
                 _contact_subset_diagnostics(obs,masks['object'],masks['grasp_part']))
@@ -544,11 +607,17 @@ class GroundingResolver:
                 downward_mask=np.zeros((h,w),dtype=bool);downward_mask[masks[role]]=downward
                 expansion_violations &= ~downward
                 downward_reports[role]=downward_evidence
-            def reject(message,failure,rejected_pixels,rejected_count,component_count=0):
-                raise ContactAssociationError(message,_contact_diagnostics(obs,role,failure,
+            def reject(message,failure,rejected_pixels,rejected_count,component_count=0,
+                       component_pixels=None):
+                diagnostics=_contact_diagnostics(obs,role,failure,
                     reference,reference_tree,proposed,masks[role],xyz,depth_valid,support_clear,
                     robot_clear,robot_depth,distances,rejected_pixels,rejected_count,component_count,
-                    downward_mask,downward_evidence))
+                    downward_mask,downward_evidence)
+                if component_pixels is not None:
+                    diagnostics['component_anchor_repairability']=_component_anchor_repairability(
+                        obs,xyz,valid,component_pixels,reference,reference_object,support_z,
+                        source_supported,semantic_exclusions[role])
+                raise ContactAssociationError(message,diagnostics)
             if len(points)<4:
                 rejected=np.argwhere(proposed&~valid)
                 reject('contact association has insufficient filtered depth','insufficient_filtered_depth',
@@ -572,9 +641,10 @@ class GroundingResolver:
             unseen=masks[role].copy()
             for y,x in point_pixels:
                 if not unseen[y,x]:continue
-                unseen[y,x]=False;stack=[(y,x)];component_anchors=0;component_count=0;component_samples=[]
+                unseen[y,x]=False;stack=[(y,x)];component_anchors=0;component_count=0;component_samples=[];component_pixels=[]
                 while stack:
                     yy,xx=stack.pop();component_anchors+=int(anchor_mask[yy,xx]);component_count+=1
+                    component_pixels.append((yy,xx))
                     if len(component_samples)<12:component_samples.append((yy,xx))
                     for ny,nx in ((yy-1,xx),(yy+1,xx),(yy,xx-1),(yy,xx+1)):
                         if (0<=ny<h and 0<=nx<w and unseen[ny,nx] and
@@ -582,7 +652,7 @@ class GroundingResolver:
                             unseen[ny,nx]=False;stack.append((ny,nx))
                 if not component_anchors:
                     reject('contact association contains an unanchored semantic surface component',
-                        'unanchored_component',component_samples,component_count,component_count)
+                        'unanchored_component',component_samples,component_count,component_count,component_pixels)
             clouds[role]=points;overlap[role]=int(anchors.sum())
         report={'frame_id':obs.frame_id,'camera_id':obs.camera_id,'target_id':target_id,
              'source':'explicit_current_frame_semantics+rgbd','original_surface_overlap_pixels':overlap,

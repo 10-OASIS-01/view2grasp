@@ -44,7 +44,7 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 ## 本轮记录索引
 
-下表保留全部 31 次已完成的本机针对性开发运行，包括成功前后的失败，均为 seed 3。各行源码/配置可能不同，不能合并计算性能指标。
+下表保留全部 32 次已完成的本机针对性开发运行，包括成功前后的失败；除 `handoff-occluded-11` 使用配置中预留的 seed 4，其余为 seed 3。各行源码/配置可能不同，不能合并计算性能指标。
 
 | 本机记录前缀 | 结果与诊断 |
 | --- | --- |
@@ -75,6 +75,7 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 | `handoff-occluded-08` | `951353f`；1024 RGB-D、8 次观测、20 次调用、1 次抓取，无记录碰撞；第 4、5、7、8 帧严格关联通过，已实际抬升并保持，首次抓取评分为 true；搬运 RRT 超时，未放置，完整成功仍为 false |
 | `handoff-occluded-09` | `c4231fc`；十帧上限、实际 9 次观测、28 次调用、1 次抓取，无记录碰撞；抬升与保持通过独立首次抓取评分；第 9 帧持物标注偏入背景，两轮均被严格关联拒绝，随后返回原高度释放，未进入搬运；第 10 帧未消耗 |
 | `handoff-occluded-10` | `8f825e4`；8 次观测、20 次调用、1 次抓取，无记录碰撞；闭爪后关联通过，但抬升仍被旧侧面端点拒绝；未抬升，未到达抬升后新视角验证分支，完整成功为 false |
+| `handoff-occluded-11` | `c4d3798`、seed 4；7 次观测、20 次调用、1 次抓取，无记录碰撞；已接近闭爪，但两次闭爪后视图均未通过显式物体／部位关联，阻止抬升，完整成功为 false |
 | `handoff-navigation-01` | 未移动；当前相机与待切换相机混淆，模型回复未通过校验 |
 | `handoff-navigation-02` | 协议通过，16 次高层观测、192 次安全观测，累计行驶约 0.8525 m，无记录碰撞；未到达，官方成功为 false |
 | `handoff-navigation-03` | 12 次高层观测、176 次安全观测，行驶约 0.9592 m，无记录碰撞；模型提出 finish，但独立成功判据未通过 |
@@ -142,7 +143,14 @@ GLM 接入已经单独提交 [PR #1](https://github.com/10-OASIS-01/view2grasp/p
 
 `handoff-occluded-10` 的 159 个状态已实际回放（20 fps、7.95 s），独立评分与结果一致，完整成功仍为 false：`artifacts/handoff/occluded-10-replay-report.json`。37 个 Python 源文件匹配 `8f825e4`。按原顺序重建八帧地图和 1325 点载荷，复现全部 6 处机械臂占据拒绝，来自第 3、4 帧仍未关联的目标表面：`artifacts/handoff/occluded-10-lift-map-audit/report.json`。严格子集关联仅做离线设计对照；忽略少数坏像素并不足够，必须保留弃权端点的占据和非目标接触保护，目前未进入生产。
 
+
+第 10 次遮挡运行第 4 帧的额外同图纠错探针通过原严格解析：712 个物体点／部位点，各 379 个固定原参考锚点。一次额外语义回答用了两次 HTTP 调用（首个输出协议错误），合计约 11.39 s；未新增观察、修改坐标或改变几何阈值。将这份完整实测掩膜用于保存地图的反事实检查，可消除原六处机械臂占据拒绝，同一首个抬升检查姿态及载荷检查通过；尚未执行整条抬升或在线完成。证据：`artifacts/handoff/occluded-10-frame4-third-online/report.json`、`artifacts/handoff/occluded-10-lift-map-audit/thirdmask-fixed-state-full-planner.json`。
+
+`handoff-occluded-11` 全部 211 个保存状态已实际回放（20 fps、10.55 s），独立评分与结果一致；37 个 Python 源文件匹配 `c4d3798`。见 `artifacts/handoff/occluded-11-replay-report.json` 和 `artifacts/handoff/occluded-11-source-provenance.json`。
+
 ## 工程与环境验证
+
+- 同帧标注的最后一次纠错现在识别实测连通性改善：同一图像、参考与角色下，无锚分量在原几何候选域内从不可达变为可连接固定原锚，才能沿用原三答上限继续问一次。没有自动填补区域或放宽接受条件；邻物、背景、机器人、支撑、负点与孔洞反例均覆盖。完整原生回归 **725 项通过**（9.99 s），见 `artifacts/handoff/regression-m1-topology-progress.log`。
 
 - 闭爪后选视角现在将已退休的持物表面纳入遮挡预测，避免误判透视；静态地图及 UNKNOWN 判据不变。完整原生回归 **697 项通过**（9.99 s），见 `artifacts/handoff/regression-m1-payload-advice.log`。
 

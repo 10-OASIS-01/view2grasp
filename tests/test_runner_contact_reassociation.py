@@ -21,6 +21,7 @@ from view2grasp.types import GraspCandidate
     ('accepted',False,False,'cropped'),('accepted',False,False,'fallback'),
     ('repair_then_accept',False,False,'cropped'),
     ('progress_then_accept',False,False,'cropped'),('progress_then_reject',False,False,'cropped'),
+    ('topology_then_accept',False,False,'cropped'),('topology_then_reject',False,False,'cropped'),
     ('accepted',False,False,'multiple_mapping_views'),
 ])
 def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
@@ -38,7 +39,8 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         xyz=unproject(np.stack([u,v],-1),depth,K,sample.T_wc)
     original_part=np.zeros_like(mask);original_part[10+padding:14+padding,8+padding:10+padding]=True
     part_reference=xyz[original_part]
-    original_object=part_reference.copy() if multiple_mapping_views else xyz[mask]
+    topology_repair=annotation_outcome in ('topology_then_accept','topology_then_reject')
+    original_object=part_reference.copy() if multiple_mapping_views or topology_repair else xyz[mask]
     evidence=SimpleNamespace(cameras=[],observations=[],targets=[],candidate_lists=[],vlm_calls=[],events=[],
         removal_requests=[],remaining_obstacles=[],executed=[],lift_checks=0,measured_objects=[],annotation_shapes=[],association_shapes=[],
         association_frames=[],association_references=[],planning_association_frames=[])
@@ -166,6 +168,11 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
                     proposed_mask[10+padding:14+padding,12+padding:16+padding]=True
                 elif self.calls==4 or outcome=='progress_then_reject':
                     proposed_mask[10+padding:14+padding,12+padding:16+padding]=True
+            if outcome in ('topology_then_accept','topology_then_reject'):
+                if self.calls==3:
+                    proposed_mask[10+padding:14+padding,12+padding:16+padding]=True
+                elif self.calls==4 or outcome=='topology_then_reject':
+                    proposed_mask[:,10+padding]=False
             proposed_part=original_part if post_close else None
             if 'bounds_xyxy' in image_context:
                 x0,y0,x1,y1=image_context['bounds_xyxy']
@@ -263,7 +270,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
     if crop_mode=='cropped':
         assert evidence.annotation_shapes==[(128,128)]*(1+len(repairs))
         assert evidence.association_shapes==[sample.depth.shape]*(1+len(repairs))
-        assert len(evidence.targets[-1])==(8 if annotation_outcome=='progress_then_reject' else 16)
+        assert len(evidence.targets[-1])==(8 if annotation_outcome in ('progress_then_reject','topology_then_reject') else 16)
     elif crop_mode=='fallback':
         assert evidence.annotation_shapes==evidence.association_shapes==[sample.depth.shape]
         assert any(e['kind']=='contact_annotation_crop_unavailable' for e in evidence.events)
@@ -304,7 +311,7 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
             assert result['failure']=='execution: post-close object/part association unverified; lift blocked'
             assert len([e for e in events if e['kind']=='contact_association_rejected'])==2+len(repairs)
         return
-    if annotation_outcome in ('accepted','repair_then_accept','progress_then_accept'):
+    if annotation_outcome in ('accepted','repair_then_accept','progress_then_accept','topology_then_accept'):
         assert len(evidence.targets)==2 and len(evidence.targets[-1])==16
         assert any(e['kind']=='contact_association' and not e['grasp_ray_changed'] for e in events)
         saved=json.loads((tmp_path/'occluded_active_0003/contact_association_002.json').read_text())
@@ -312,12 +319,17 @@ def test_mapping_reassociation_preserves_ray_and_never_moves_for_annotation(
         assert saved['image_context']==context['image_context']
         if annotation_outcome=='repair_then_accept':
             assert len(repairs)==1 and len(evidence.annotation_shapes)==2
-        elif annotation_outcome=='progress_then_accept':
+        elif annotation_outcome in ('progress_then_accept','topology_then_accept'):
             assert len(repairs)==2 and len(evidence.annotation_shapes)==3
     else:
         assert len(evidence.targets)==1
         assert any(e['kind']=='contact_association_rejected' for e in events)
         assert not any(e['kind']=='contact_association' for e in events)
-        if annotation_outcome=='progress_then_reject':
+        if annotation_outcome in ('progress_then_reject','topology_then_reject'):
             assert len(repairs)==2 and len(evidence.annotation_shapes)==3
+    if topology_repair:
+        failures=[e['diagnostics'] for e in events if e['kind']=='contact_association_rejected']
+        assert failures[0]['anchor_pixels']>failures[1]['anchor_pixels']>=4
+        assert [d['component_anchor_repairability']['anchor_reachable_fraction'] for d in failures[:2]]==[0.,1.]
+        assert result['vlm_calls']==5 and result['observations']==2
     assert not (tmp_path/'occluded_active_0003/error.txt').exists()

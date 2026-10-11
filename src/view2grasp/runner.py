@@ -24,6 +24,40 @@ from .placement import tabletop_placement
 from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
 
 
+def _contact_annotation_progressed(previous, current):
+    """Authorize a bounded final semantic reply, never accept geometry here."""
+    if previous is None or current is None:return False
+    if (previous.get('frame_id')!=current.get('frame_id') or
+            previous.get('camera_id')!=current.get('camera_id')):
+        return False
+    if ((previous['role']=='object' and current['role']=='grasp_part') or
+            (current['anchor_pixels'],-current['rejected_pixel_count'])>
+            (previous['anchor_pixels'],-previous['rejected_pixel_count'])):
+        return True
+    if previous['role']!=current['role']:return False
+    for report in (previous,current):
+        if (report.get('failure')!='unanchored_component' or report['anchor_pixels']<4 or
+                report.get('rejection_counts',{}).get('reference_distance')!=0):
+            return False
+    before=previous.get('component_anchor_repairability',{})
+    after=current.get('component_anchor_repairability',{})
+    if (not before.get('evidence_sha256') or
+            before.get('evidence_sha256')!=after.get('evidence_sha256')):
+        return False
+    for value in (before,after):
+        count=value.get('component_pixels');reachable=value.get('anchor_reachable_pixels')
+        if (value.get('basis')!='observed_geometry_boundary_reinspection_only' or
+                value.get('grants_semantic_or_contact_permission') is not False or
+                type(count) is not int or type(reachable) is not int or
+                count<=0 or not 0<=reachable<=count):
+            return False
+    # A component is itself connected by the same metric graph, so reachability
+    # from fixed anchors is all or none. Compare exact counts rather than a
+    # rounded ratio. Only newly possible boundary repair unlocks the last reply.
+    return (before['anchor_reachable_pixels']==0 and
+        after['anchor_reachable_pixels']==after['component_pixels'])
+
+
 def leading_shell(points,resolution=.005):
     """Highest observed sweep point per XY voxel for upward-motion visibility."""
     points=np.asarray(points)
@@ -205,10 +239,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     diagnostics=getattr(exc,'diagnostics',None)
                     event('contact_association_rejected',frame_id=observation.frame_id,reason=str(exc),
                         repair=repair,diagnostics=diagnostics)
-                    progressed=(previous_diagnostics is not None and diagnostics is not None and (
-                        (previous_diagnostics['role']=='object' and diagnostics['role']=='grasp_part') or
-                        (diagnostics['anchor_pixels'],-diagnostics['rejected_pixel_count'])>
-                        (previous_diagnostics['anchor_pixels'],-previous_diagnostics['rejected_pixel_count'])))
+                    progressed=_contact_annotation_progressed(previous_diagnostics,diagnostics)
                     if isinstance(exc,ContactAssociationError) and (repair==0 or (repair==1 and progressed)):
                         feedback=copy.deepcopy(diagnostics)
                         previous_diagnostics=diagnostics
