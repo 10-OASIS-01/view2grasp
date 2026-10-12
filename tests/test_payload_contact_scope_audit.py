@@ -112,4 +112,3 @@ def test_independent_contact_scope_does_not_remove_body_from_collision_checks():
     planner.robot.payload_intersects_noncontact_robot = lambda points: bool(np.any(points[:, 0] > .22))
     assert not planner.valid(np.zeros(1))
     assert planner.last_failure == 'carried object intersects non-contact robot'
-
