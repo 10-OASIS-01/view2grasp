@@ -34,7 +34,7 @@ def test_fresh_explicit_part_can_initialize_unanchored_face_without_whole_object
     report=result.attempts[-1].log['initial_part']
     assert report['part_side_anchor_pixels']==0 and not report['part_component_anchor_gate_applied']
     assert not result.ownership.report['grants_contact_permission']
-    assert client.requests[0][3]['annotation_roles']==('object','grasp_part')
+    assert client.requests[0][3]['annotation_roles'] is None
     assert 'No permitted part is requested' not in client.requests[0][1]
     assert 'whole-object labels never do' in client.requests[0][1]
 
@@ -114,3 +114,25 @@ def test_part_view_selection_does_not_create_membership_or_select_filtered_backg
 def test_invalid_part_view_reference_fails_explicitly(reference):
     side,_,_,_=scene()
     with pytest.raises(ValueError):select_initial_part_view([],side,reference,.9,{})
+
+
+def test_joint_initialization_uses_real_provider_default_object_part_contract(tmp_path, monkeypatch):
+    import json
+    from test_vlm_object_annotation import client_with_responses
+    for name in ('VLM_PROVIDER','VLM_BASE_URL','VLM_MODEL','VLM_API_KEY','ZHIPU_API_KEY',
+                 'VLM_TIMEOUT_SECONDS','VLM_MAX_TOKENS','VLM_THINKING','VLM_REASONING_EFFORT'):
+        monkeypatch.delenv(name,raising=False)
+    obs, _, mask, reference = scene()
+    response = reply(obs,mask,mask,seeds=((2,6),))
+    requests=[]
+    client=client_with_responses(tmp_path,[response],requests)
+    try:
+        result=annotate_initial_object_reference(client,obs,replace(obs,frame_id=8),
+            reference,'mug',.9,robot_depth=np.full_like(obs.depth,10.),side_part=reference)
+    finally:
+        client.client.close()
+    assert result.ownership is not None and result.initial_part_points is not None
+    assert client.calls==1
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    assert context['annotation_context']['instructions'].startswith('Annotate the requested object and permitted part')
+    assert 'only object groundings' not in context['response_contract']

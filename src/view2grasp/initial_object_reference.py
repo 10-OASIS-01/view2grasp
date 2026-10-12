@@ -347,7 +347,8 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         ownership = source_reply = rejection = None
         try:
             raw = vlm.decide(crop.observation, instruction, copy.deepcopy([transaction]),
-                force_observe=True, observe_purpose='annotation', annotation_roles=roles,
+                force_observe=True, observe_purpose='annotation',
+                annotation_roles=('object',) if side_part is None else None,
                 derived_image_context=copy.deepcopy(crop.provenance()), annotation_diagnostic=diagnostic)
             log['raw_annotation'] = raw.model_dump(mode='json')
             source_reply = crop.restore_decision(raw)
