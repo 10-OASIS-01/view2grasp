@@ -30,7 +30,7 @@ These are single-seed development results. Their source snapshots preserve the o
 
 ## Current scope (updated by user)
 
-The current priority is M1 only: finish the remaining mug task after the accepted block and occluded episodes. M0 is deferred; earlier M2/M3 changes are retained without continuing their online acceptance in this phase. The 300-episode benchmark is cancelled. Use small targeted development validation, not a seed/policy sweep. Prefer offline diagnosis of retained failures before more online calls. The first system demo is complete; the final five-task demo remains later work. `evaluate` defaults to at most 15 development episodes and rejects larger batches; this is a cap, not a requirement to launch another full batch.
+At the user’s request, M1 is closed out as an engineering handoff with known limitations. Block and occluded have accepted online episodes; the mug lift/hold remains unaccepted and is deferred from this closeout. See the [concise M1 status](M1-status.zh-CN.md). M0 is deferred; earlier M2/M3 changes are retained without continuing their online acceptance in this phase. The 300-episode benchmark is cancelled. Use small targeted development validation, not a seed/policy sweep. Prefer offline diagnosis of retained failures before more online calls. The first system demo is complete; the final five-task demo remains later work. `evaluate` defaults to at most 15 development episodes and rejects larger batches; this is a cap, not a requirement to launch another full batch.
 
 ## Measured engineering progress
 
