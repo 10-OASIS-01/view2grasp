@@ -194,7 +194,13 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
     transaction = {'source_object_annotation': {'frame_id': source_obs.frame_id,
         'camera_id': source_obs.camera_id, 'target_id': target_id,
         'image_context': copy.deepcopy(context), 'attempt': 0, 'maximum_semantic_requests': 2}}
-    diagnostic = None
+    # The first current-object crop can be only 128 pixels wide. Give the
+    # same measured pixel centers the existing coordinate aid before a bad
+    # click consumes the only correction; this supplies no semantic labels.
+    diagnostic = build_annotation_diagnostic(crop.observation, {
+        'frame_id':crop.observation.frame_id,'camera_id':crop.observation.camera_id,
+        'coordinate_space':'supplied_crop_normalized_pixel_centers',
+        'image_shape_hw':list(crop.observation.depth.shape),'rejected_samples':[]})
     repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope',
         'unanchored_seeded_component', 'insufficient_original_overlap', 'no_accepted_components'}
     for index in range(2):

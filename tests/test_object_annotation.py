@@ -98,6 +98,18 @@ def test_one_success_uses_reference_crop_and_restores_exact_source_pixels():
     assert pixels(restored.groundings[1].points, obs.depth.shape).tolist() == [[230, 210]]
     assert np.array_equal(reference, original_reference) and np.array_equal(obs.depth, original_depth)
     assert result.report['vlm_calls'] == 1 and result.report['inference_seconds'] == pytest.approx(.1)
+
+
+def test_first_source_annotation_has_same_pixel_aid_without_proposed_semantics():
+    obs,reference,_=source_scene()
+    client=FakeVLM(['good'])
+    result=annotate(client,obs,reference)
+    request=client.requests[0];crop=request['obs']
+    aid=request['kwargs']['annotation_diagnostic'];aid.validate_source(crop)
+    assert aid.rejected_pixels==() and aid.scale==4
+    assert np.array_equal(aid.rgb[::aid.scale,::aid.scale],crop.rgb)
+    assert result.attempts[0].log['diagnostic']['normalized_pixel_centers_match_primary']
+    assert 'geometry_diagnostics' not in request['history'][0]['source_object_annotation']
     assert result.report['new_observations'] == 0 and not result.report['reply_results_merged']
 
 
@@ -109,7 +121,7 @@ def test_real_rejection_gets_one_same_crop_correction_and_localized_diagnostic()
     first, second = client.requests
     assert first['obs'] is second['obs']
     assert first['kwargs']['derived_image_context'] == second['kwargs']['derived_image_context']
-    assert first['kwargs']['annotation_diagnostic'] is None
+    assert first['kwargs']['annotation_diagnostic'].rejected_pixels == ()
     diagnostic = second['kwargs']['annotation_diagnostic']
     diagnostic.validate_source(second['obs'])
     transaction = second['history'][0]['source_object_annotation']
