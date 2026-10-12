@@ -136,3 +136,29 @@ def test_joint_initialization_uses_real_provider_default_object_part_contract(tm
     context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
     assert context['annotation_context']['instructions'].startswith('Annotate the requested object and permitted part')
     assert 'only object groundings' not in context['response_contract']
+
+
+def test_one_correction_contains_object_and_part_geometry_failures_without_partial_authority():
+    obs,xyz,mask,reference=scene(end=50)
+    full_reference=xyz[mask]
+    bad_part=np.zeros_like(mask);bad_part[6:10,44:48]=True
+    good_part=np.zeros_like(mask);good_part[6:10,2:4]=True
+    bad=reply(obs,mask,bad_part,seeds=((2,6),(1,6)))
+    good=reply(obs,mask,good_part,seeds=((2,6),))
+    result,client=initialize(obs,full_reference,reference,[bad,good])
+    assert result.attempts[0].ownership is None and result.ownership is not None
+    failures=result.attempts[0].log['diagnostics']['abstentions']
+    assert [f['failure'] for f in failures]==['invalid_explicit_seed','initial_part_outside_fixed_envelope']
+    assert np.array_equal(result.initial_part_points,xyz[good_part])
+    assert len(client.requests[1][2][0]['initial_object_reference']['geometry_diagnostics']['failures'])==2
+    assert len(client.requests)==2 and not result.report['reply_results_merged']
+
+
+def test_invalid_part_protocol_is_not_repairable_via_an_object_geometry_failure():
+    obs,_,mask,reference=scene()
+    bad=reply(obs,mask,mask,seeds=((2,6),(1,6)))
+    bad.groundings[-1]=bad.groundings[-1].model_copy(update={'target_id':'other'})
+    result,client=initialize(obs,reference,reference,[bad])
+    assert result.ownership is None and result.initial_part_points is None
+    assert result.attempts[0].log['diagnostics']['failure']=='initial_part_region_required'
+    assert len(client.requests)==1

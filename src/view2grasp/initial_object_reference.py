@@ -72,14 +72,14 @@ def select_initial_part_view(observations, side_obs, side_part, support_z, robot
         'new_observations':0,'maximum_additional_source_images':1}
 
 
-def _resolve_initial_part(obs, decision, ownership, side_part, support_z, robot_depth):
-    """Fresh, explicit same-part initialization; never inherit whole-object contact."""
+def _initial_part_selection(obs, decision, target_id, side_part, support_z, robot_depth):
+    """Check part geometry independently so the sole correction sees all faults."""
     proposals=[g for g in decision.groundings if g.role=='grasp_part']
     def reject(failure,message,**details):
         raise ObjectOwnershipError(message,{'frame_id':obs.frame_id,'camera_id':obs.camera_id,
             'failure':failure,'scope':'fresh_initial_part_semantics','partial':False,**details})
     if (len(proposals)!=1 or proposals[0].kind not in ('box','polygon','mask')
-            or any(g.source!='vlm' or g.target_id!=ownership.report['target_id']
+            or any(g.source!='vlm' or g.target_id!=target_id
                 or g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id for g in proposals)):
         reject('initial_part_region_required','provide one explicit same-target grasp_part region')
     proposal=proposals[0];mask=proposal_mask(proposal,obs)
@@ -90,10 +90,6 @@ def _resolve_initial_part(obs, decision, ownership, side_part, support_z, robot_
     valid=(np.isfinite(xyz).all(2)&(obs.depth>.05)&(obs.depth<10)&(xyz[:,:,2]>support_z+.006))
     if robot_depth is not None:valid&=np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
     selected=mask&valid
-    outside=selected&~ownership.object_mask
-    if outside.any():
-        reject('initial_part_outside_owned_object','part material must belong to the independently seeded initial object',
-            rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=np.argwhere(outside)[:12,::-1].tolist())
     points=xyz[selected]
     if len(points)<4:reject('initial_part_insufficient_material','part region contains fewer than four measured material pixels')
     lo,hi=side_part.min(0)-REFERENCE_MARGIN_M,side_part.max(0)+REFERENCE_MARGIN_M
@@ -108,6 +104,15 @@ def _resolve_initial_part(obs, decision, ownership, side_part, support_z, robot_
         'part_component_anchor_gate_applied':False,'ray_changed':False,
         'semantic_identity_limit':'The initial same-part label is a VLM assumption, not geometric proof of hidden part identity.'}
     return _readonly(points),_readonly(selected),report
+
+
+def _validate_initial_part_ownership(obs, selected, ownership):
+    outside=selected&~ownership.object_mask
+    if outside.any():
+        raise ObjectOwnershipError('part material must belong to the independently seeded initial object',
+            {'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+             'failure':'initial_part_outside_owned_object','scope':'fresh_initial_part_semantics','partial':False,
+             'rejected_pixel_count':int(outside.sum()),'rejected_pixels_xy':np.argwhere(outside)[:12,::-1].tolist()})
 
 
 def _validate_initial_sources(source_obs, side_obs, side_object, support_z, robot_depth):
@@ -339,6 +344,10 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         base_instruction=base_instruction.replace(
             'No contact, map retirement or free-space permission is granted by this annotation request.',
             'Only the independently validated grasp_part material may extend the initial part reference; whole-object labels never do. This request grants no map retirement or free-space permission.')
+        base_instruction+=(' The grasp_part region is a material mask, not a loose detection box: '
+            'every depth-valid pixel must be on the requested bar and inside independently seeded '
+            'object material. Keep all edges strictly inside the visible bar, away from its hole '
+            'and background; use a narrow polygon when needed. A box crossing a hole is rejected.')
         report['initial_part_reference']=True
     transaction = {'initial_object_reference': {'frame_id': source_obs.frame_id,
         'camera_id': source_obs.camera_id, 'target_id': target_id, 'attempt': 0,
@@ -361,11 +370,32 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             if any(g.role not in roles for g in source_reply.groundings):
                 raise ValueError('unexpected role in initial reference')
             object_reply=source_reply.model_copy(update={'groundings':[g for g in source_reply.groundings if g.role=='object']})
-            ownership = _resolve_initial_object_reference(source_obs, object_reply, reference,
-                target_id, support_z, robot_depth)
+            geometry_errors=[]
+            try:
+                ownership = _resolve_initial_object_reference(source_obs, object_reply, reference,
+                    target_id, support_z, robot_depth)
+            except ObjectOwnershipError as exc:
+                geometry_errors.append(exc)
             if side_part is not None:
-                initial_part_points,initial_part_mask,part_report=_resolve_initial_part(
-                    source_obs,source_reply,ownership,side_part,support_z,robot_depth)
+                try:
+                    part_points,part_mask,part_report=_initial_part_selection(
+                        source_obs,source_reply,target_id,side_part,support_z,robot_depth)
+                    if ownership is not None:
+                        _validate_initial_part_ownership(source_obs,part_mask,ownership)
+                except ObjectOwnershipError as exc:
+                    geometry_errors.append(exc)
+            if geometry_errors:
+                # Protocol errors cannot gain a retry through another role's
+                # repairable geometry. No provisional point set is returned.
+                primary=next((e for e in geometry_errors if e.diagnostics['failure'] not in repairable),geometry_errors[0])
+                if len(geometry_errors)==1:
+                    raise primary
+                details=copy.deepcopy(primary.diagnostics)
+                details['abstentions']=[f for e in geometry_errors
+                    for f in (e.diagnostics.get('abstentions') or [e.diagnostics])]
+                raise ObjectOwnershipError('initial object and part selection failed independently',details)
+            if side_part is not None:
+                initial_part_points,initial_part_mask=part_points,part_mask
                 log['initial_part']=part_report
             log['ownership'] = copy.deepcopy(ownership.report)
         except ObjectOwnershipError as exc:
