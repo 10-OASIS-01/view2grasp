@@ -108,6 +108,7 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
                    np.isfinite(robot_depth) & (obs.depth < robot_depth - .003))
     candidate = semantic & depth_valid & support_clear & robot_clear
     seed_pixels = pixels(seeds, (h, w)).reshape(-1, 2)
+    invalid_seeds = []
     for index, (xx, yy) in enumerate(seed_pixels):
         if candidate[yy, xx]:
             continue
@@ -117,8 +118,14 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
         if not depth_valid[yy, xx]: reasons.append('invalid_depth')
         if depth_valid[yy, xx] and not support_clear[yy, xx]: reasons.append('support')
         if not robot_clear[yy, xx]: reasons.append('robot_occluded_or_unverified')
-        reject('invalid_explicit_seed', 'initial object membership seed is not valid source evidence',
-            seed_indices=[index], seed_pixel=[int(xx), int(yy)], reasons=reasons)
+        invalid_seeds.append({'failure': 'invalid_explicit_seed',
+            'seed_indices': [index], 'seed_pixel': [int(xx), int(yy)], 'reasons': reasons})
+    if invalid_seeds:
+        # Report every measured invalid click in the one bounded correction.
+        # The entire answer still fails; no valid subset becomes ownership.
+        reject('invalid_explicit_seed', 'initial object membership seeds are not valid source evidence',
+            **{k: v for k, v in invalid_seeds[0].items() if k != 'failure'},
+            invalid_seed_count=len(invalid_seeds), abstentions=invalid_seeds)
 
     lo = side_reference.min(axis=0)-REFERENCE_MARGIN_M
     hi = side_reference.max(axis=0)+REFERENCE_MARGIN_M
@@ -217,7 +224,10 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
     base_instruction = _instruction(target_id, target_description) + (
         ' This is INITIAL multi-view object membership before any robot execution. Explicitly '
         'seed each separate clearly visible surface of the same object, including identifiable '
-        'inner material. Do not seed an independent object, support or the robot. No earlier '
+        'inner material. Each seed selects its whole depth-connected surface: use a small '
+        'number of confident interior clicks, not a dense outline or repeated clicks on '
+        'one surface. Stay off silhouette edges and thin open gaps; any invalid seed rejects '
+        'the whole answer. Do not seed an independent object, support or the robot. No earlier '
         'unowned component is being automatically reclassified; the supplied crop is the only '
         'image for this fresh annotation. The independent side image establishes a fixed '
         'geometric admission envelope and overall overlap, not labels for new source surfaces.')

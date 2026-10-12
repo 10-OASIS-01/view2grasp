@@ -170,6 +170,22 @@ def test_full_outlying_component_rejected_then_fresh_reply_not_merged_and_feedba
     assert not result.report['reply_results_merged'] and result.report['new_observations'] == 0
 
 
+def test_one_correction_reports_all_invalid_seeds_and_never_accepts_a_valid_subset():
+    obs, _, mask, reference = scene(end=25)
+    first = annotation(obs, mask, seeds=((2, 6), (1, 6), (30, 6)))
+    second = annotation(obs, mask)
+    result, client = initialize(obs, reference, [first, second])
+    assert result.attempts[0].ownership is None
+    diagnostics = result.attempts[0].log['diagnostics']
+    assert diagnostics['invalid_seed_count'] == 2
+    feedback = client.requests[1][2][0]['initial_object_reference']['geometry_diagnostics']
+    assert [f['seed_indices'] for f in feedback['failures']] == [[1], [2]]
+    assert [s['pixel'] for s in feedback['rejected_samples']] == [[1, 6], [30, 6]]
+    assert all(s['sample_kind'] == 'invalid_seed' for s in feedback['rejected_samples'])
+    assert result.ownership is not None and len(client.requests) == 2
+    assert not result.report['reply_results_merged']
+
+
 def test_bad_third_component_does_not_return_good_anchored_and_novel_components():
     obs, _, mask, reference = neighbor_scene()
     depth = obs.depth.copy(); depth[12:14, 50:52] = 1.

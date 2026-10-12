@@ -309,4 +309,6 @@ MUJOCO_GL=cgl uv run view2grasp replay \
 
 每张源图最多初答加一次实际失败纠错，任一非法种子或越界组件整答拒绝，只返回最后一答的独立结果，不合并答复。成功后一次性冻结侧视与新源表面的 ownership reference；原接触部位、抓取射线及配准拟合参考仍使用侧视原值。后续物体归属的逐组件四锚点、4 mm 重叠、6 mm 连通及完整包络检查不变，retained 优先级不变。历史源点仍须经新取得的当前实测数据配准通过，先纳入载物碰撞检查，才允许原有同源数值等值退休；不扩大接触或 UNKNOWN/FREE 权限。
 
-零 API 静止来源预检使用第20次保存的第1／4帧：10677 个侧视端点全部匹配，最大重投影端点误差为 **0 m**，模拟时间、关节和夹爪一致。该检查没有运行新语义解析、建立新归属或改判旧失败，见 `artifacts/handoff/mug-20-initial-reference-precheck.json`。新增 helper 的 **30 项**离线测试通过；独立 helper／配置／runner／生命周期组合 **49 项**通过。随后补充缺少明确物体身份时在执行前拒绝的回归，完整原生测试 **1083 项通过**（17.98 s），日志 `artifacts/handoff/regression-m1-initial-multiview-reference.log`；差异检查通过。真实 API 验证仍待用户授权，**M1 尚未完成**，旧 M20 的拒绝和 retained 证据保持原样。
+零 API 静止来源预检使用第20次保存的第1／4帧：10677 个侧视端点全部匹配，最大重投影端点误差为 **0 m**，模拟时间、关节和夹爪一致。该检查没有运行新语义解析、建立新归属或改判旧失败，见 `artifacts/handoff/mug-20-initial-reference-precheck.json`。新增 helper 的 **30 项**离线测试通过；独立 helper／配置／runner／生命周期组合 **49 项**通过。随后补充缺少明确物体身份时在执行前拒绝的回归，完整原生测试 **1083 项通过**（17.98 s），日志 `artifacts/handoff/regression-m1-initial-multiview-reference.log`；差异检查通过。该提交完成时真实 API 验证待用户授权，**M1 尚未完成**，旧 M20 的拒绝和 retained 证据保持原样。
+
+用户随后明确授权将项目仿真图像发送至智谱官方 API。`880fa39` 保存图新初始化探针取得两次真实回复，均被支撑平面过滤拒绝；第一答实际有 8 个无效种子，但旧反馈只标出第一个，第二答仍有 4 个无效种子。未执行机器人或改写旧 M20。修复为同一次纠错报告全部测得的无效种子（图像仍遵守 12 个标记上限），并说明每个种子会选择其整个深度连通表面，鼓励少量明确的内部点。任一非法种子整答拒绝、两答预算与全部几何门限保持不变。60 项定向回归通过；完整原生回归 **1084 项通过**（18.40 s），日志 `artifacts/handoff/regression-m1-initial-reference-feedback.log`；原失败答复离线诊断见 `artifacts/handoff/initial-reference-all-invalid-feedback.json`。新反馈尚待新真实回复验证。
