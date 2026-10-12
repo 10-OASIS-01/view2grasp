@@ -162,3 +162,19 @@ def test_invalid_part_protocol_is_not_repairable_via_an_object_geometry_failure(
     assert result.ownership is None and result.initial_part_points is None
     assert result.attempts[0].log['diagnostics']['failure']=='initial_part_region_required'
     assert len(client.requests)==1
+
+
+def test_confirmed_part_reduces_novelty_without_expanding_fixed_admission_envelope():
+    obs,xyz,mask,reference=scene(end=50)
+    side=replace(obs,frame_id=2);candidate=replace(obs,frame_id=7)
+    depths={7:np.full_like(obs.depth,10.)}
+    chosen,first=select_initial_part_view([candidate],side,reference,.9,depths)
+    assert chosen is candidate
+    chosen,second=select_initial_part_view([candidate],side,reference,.9,depths,known_part_points=xyz[mask])
+    assert chosen is None
+    assert first['fixed_side_part_sha256']==second['fixed_side_part_sha256']
+    assert first['ranked_frames'][0]['measured_candidate_pixels']==second['ranked_frames'][0]['measured_candidate_pixels']
+    assert first['ranked_frames'][0]['novel_candidate_voxels']>0
+    assert second['ranked_frames'][0]['novel_candidate_voxels']==0
+    with pytest.raises(ValueError,match='finite confirmed material'):
+        select_initial_part_view([candidate],side,reference,.9,depths,known_part_points=np.array([[np.nan]*3]*4))

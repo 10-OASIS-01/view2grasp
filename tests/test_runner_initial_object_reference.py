@@ -73,3 +73,21 @@ def test_extra_initial_source_has_no_retirement_or_certificate_without_current_f
     assert [f for f,_ in e.retired]==[4,5,6]
     assert e.planner.registered_payload_local is None
     assert not _contains(e.source_certificates[-1],e.source_points)
+
+
+def test_two_complementary_views_keep_the_original_side_envelope_and_all_source_clouds(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,
+        initialize_part_count=2,max_observations=7)
+    assert result['observations']==7 and result['attempts']==1
+    assert [(a,b) for a,b,_ in e.initializations]==[(1,4),(2,4),(3,4)]
+    assert [f for f,_ in e.retired]==[1,2,3,5,6,7]
+    assert len(e.planner.registered_payload_local)==3*len(e.predicted)
+    assert np.array_equal(e.candidate.approach,e.original_ray)
+    assert not e.map.contact_allowed(e.predicted).any()
+
+
+def test_second_complementary_failure_cannot_execute_using_first_accepted_view(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,
+        initialize_part_count=2,fail_part_frame=3,max_observations=7)
+    assert len(e.initializations)==3 and result['attempts']==0
+    assert not e.executed and not e.registrations and not e.retired

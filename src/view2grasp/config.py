@@ -27,6 +27,7 @@ class ExperimentConfig(BaseModel):
     # acquired overview and side view before freezing reassociation references.
     initial_multiview_reference: bool = False
     initial_multiview_part: bool = False
+    initial_part_views: int = Field(default=1,ge=1,le=2)
     # Mug development: share the existing search budget across candidate poses
     # before repeating redundant-IK seeds for any one pose.
     diversify_grasp_attempts: bool = False
@@ -56,6 +57,8 @@ class ExperimentConfig(BaseModel):
             raise ValueError('initial multiview reference requires source object ownership')
         if self.initial_multiview_part and not self.initial_multiview_reference:
             raise ValueError('initial multiview part requires initial multiview object reference')
+        if self.initial_part_views!=1 and not self.initial_multiview_part:
+            raise ValueError('additional initial part views require explicit part initialization')
         return self
 
 

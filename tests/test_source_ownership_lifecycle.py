@@ -21,7 +21,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                   complete_lift=False, max_observations=4, initialize_reference=False,
                   initialization_ok=True, initial_identity=True, initialize_part=False, part_initialization_ok=True,
                   pose_recovery=False,recovery_registration_ok=False,recovery_failure='ambiguous_local_pose',
-                  pose_recovery_at=0):
+                  pose_recovery_at=0,initialize_part_count=1,fail_part_frame=None):
     from view2grasp import recording, runner
     sample, xyz, mask, original = scene()
     part_mask = np.zeros_like(mask); part_mask[6:10, 2:4] = True
@@ -106,7 +106,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             super().remove_target_endpoints(points, radius)
         def retire_owned_source(self, ownership, obs):
             collision_world = evidence.planner.payload_collision_local() @ rotation.T + position
-            expected = predicted if obs.frame_id in ((1,2) if initialize_part else (1,)) else ownership.object_points
+            expected = predicted if obs.frame_id in (tuple(range(1,2+initialize_part_count)) if initialize_part else (1,)) else ownership.object_points
             # Exact retirement is reached only after the entire qualified cloud
             # has collision coverage in the actual attachment coordinates.
             assert _contains(collision_world, expected)
@@ -150,7 +150,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                 evidence.camera_requests.append(request.copy())
                 az,el,dist=request['reference_view']
                 return AgentDecision(action='observe',frame_id=obs.frame_id,azimuth=az,elevation=el,distance=dist)
-            if kwargs.get('force_observe') or (initialize_reference and obs.frame_id==1) or (initialize_part and obs.frame_id==2):
+            if kwargs.get('force_observe') or (initialize_reference and obs.frame_id==1) or (initialize_part and obs.frame_id<=1+initialize_part_count):
                 return AgentDecision(action='observe', frame_id=obs.frame_id)
             decision = annotation(obs, mask)
             explicit_part = annotation(obs, part_mask).groundings[0].model_copy(update={'role': 'grasp_part'})
@@ -181,7 +181,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
 
     def register(reference, measured, source):
         assert np.array_equal(reference, original)
-        assert np.array_equal(source,np.vstack([source_points,source_points]) if initialize_part else source_points)
+        assert np.array_equal(source,np.vstack([source_points]*(1+initialize_part_count)) if initialize_part else source_points)
         evidence.registrations.append(measured.copy())
         # No acquired current surface means no registration, even if the old
         # pre-close target is geometrically identical to the original reference.
@@ -190,18 +190,20 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         if not len(measured) or not ok:
             raise PayloadRegistrationError('deliberate rejection', {'accepted': False,
                 'failure':'no_current_evidence' if not len(measured) else recovery_failure if pose_recovery else 'test'})
-        return SimpleNamespace(transformed_source_points=np.vstack([predicted,predicted]) if initialize_part else predicted.copy(), report={'accepted': True})
+        return SimpleNamespace(transformed_source_points=np.vstack([predicted]*(1+initialize_part_count)) if initialize_part else predicted.copy(), report={'accepted': True})
 
     def initialize(vlm, source, side, reference, identity, support, **kwargs):
         assert not evidence.executed and evidence.sim.phase=='observe'
         is_part=kwargs.get('side_part') is not None
-        assert (source.frame_id,side.frame_id)==((2,3) if is_part else (1,3) if initialize_part else (1,2))
+        assert side.frame_id==(2+initialize_part_count if initialize_part else 2)
+        assert source.frame_id in (range(2,2+initialize_part_count) if is_part else (1,))
+        if is_part:assert np.array_equal(kwargs['side_part'],original)
         assert source.timestamp==side.timestamp
         assert np.array_equal(reference,original)
         assert not evidence.retired and not evidence.source_certificates
         evidence.initializations.append((source.frame_id,side.frame_id,reference.copy()))
         vlm.calls+=1
-        accepted=part_initialization_ok if is_part else initialization_ok
+        accepted=(part_initialization_ok and source.frame_id!=fail_part_frame) if is_part else initialization_ok
         ownership=resolve_object_ownership(source,annotation(source,mask),reference,
             identity,support,kwargs['robot_depth']) if accepted else None
         return SimpleNamespace(ownership=ownership,report={'semantic_requests':1,'vlm_calls':1},
@@ -242,7 +244,11 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     monkeypatch.setattr(runner, 'annotate_source_object', annotate)
     monkeypatch.setattr(runner, 'annotate_initial_object_reference', initialize)
     if initialize_part:
-        monkeypatch.setattr(runner,'select_initial_part_view',lambda views,*args,**kwargs:(views[1],{'selected_frame':2}))
+        def select(views,*args,**kwargs):
+            candidates=[v for v in views if 2<=v.frame_id<2+initialize_part_count and v.frame_id not in kwargs['excluded_frames']]
+            chosen=candidates[0] if candidates else None
+            return chosen,{'selected_frame':None if chosen is None else chosen.frame_id}
+        monkeypatch.setattr(runner,'select_initial_part_view',select)
     monkeypatch.setattr(runner, 'register_payload_source', register)
     monkeypatch.setattr(runner, 'Evaluator', lambda sim: SimpleNamespace(result=lambda: {
         'success': False, 'collision': False, 'first_grasp_success': False, 'collision_free_success': False}))
@@ -260,14 +266,15 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     monkeypatch.setattr(runner, 'save_episode', lambda out, sim, record, events: evidence.events.extend(events))
     result = runner.run_episode(task, 3, 'active', tmp_path, replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=max_observations, source_object_ownership=enabled,
-            initial_multiview_reference=initialize_reference,initial_multiview_part=initialize_part))
+            initial_multiview_reference=initialize_reference,initial_multiview_part=initialize_part,
+            initial_part_views=initialize_part_count if initialize_part else 1))
     expected_failure = ('execution: evaluator success criterion not met' if complete_lift
         else 'planning: lift deliberate lifecycle stop')
     if initialize_reference and not initialization_ok:
         expected_failure='perception: initial multiview object reference unverified'
     if initialize_reference and not initial_identity:
         expected_failure='perception: initial object reference requires one explicit target identity'
-    if initialize_part and not part_initialization_ok:
+    if initialize_part and (not part_initialization_ok or fail_part_frame is not None):
         expected_failure='perception: initial multiview part reference unverified'
     assert result['failure'] == expected_failure
     assert not result['success'] and not result['online']

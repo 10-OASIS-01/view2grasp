@@ -31,3 +31,15 @@ def test_complete_reference_config_only_enables_explicit_part_initialization():
     assert complete.pop('initial_multiview_part') is True
     assert previous.pop('initial_multiview_part') is False
     assert complete==previous
+
+
+def test_second_part_view_is_bounded_and_explicitly_configured():
+    root=Path(__file__).resolve().parents[1]
+    one=load_config(root/'configs/mug-complete-reference.yaml').model_dump()
+    two=load_config(root/'configs/mug-two-part-views.yaml').model_dump()
+    assert one.pop('initial_part_views')==1 and two.pop('initial_part_views')==2
+    assert one==two
+    for value in (0,3):
+        with pytest.raises(ValidationError):ExperimentConfig(initial_part_views=value)
+    with pytest.raises(ValidationError,match='require explicit part initialization'):
+        ExperimentConfig(initial_part_views=2)

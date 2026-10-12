@@ -879,18 +879,21 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         abstained_source_pixels_xy=source_ownership.abstained_source_pixels_xy,
                         side_object=original_object)
                     if config.initial_multiview_part:
-                        started=time.monotonic()
-                        extra_obs,selection=select_initial_part_view(map_.views,side_observation,original_part,
-                            map_.table_z,robot_depths,excluded_frames=(source_observation.frame_id,),
-                            resolution=map_.resolution)
-                        ownership_perception_seconds+=time.monotonic()-started
-                        (out/'initial_part_view_selection.json').write_text(json.dumps(selection,indent=2))
-                        if extra_obs is not None:
+                        initial_side_part=original_part.copy()
+                        for part_index in range(config.initial_part_views):
+                            started=time.monotonic()
+                            extra_obs,selection=select_initial_part_view(map_.views,side_observation,initial_side_part,
+                                map_.table_z,robot_depths,excluded_frames=(source_observation.frame_id,*(source.frame_id for _,source in additional_source_ownership)),
+                                resolution=map_.resolution,known_part_points=original_part)
+                            ownership_perception_seconds+=time.monotonic()-started
+                            selection_name='initial_part_view_selection.json' if part_index==0 else f'initial_part_view_selection_{part_index+1:03d}.json'
+                            (out/selection_name).write_text(json.dumps(selection,indent=2))
+                            if extra_obs is None:break
                             started=time.monotonic();inference_before=vlm.seconds
                             extra=annotate_initial_object_reference(vlm,extra_obs,side_observation,
                                 original_object,ownership_identity,map_.table_z,
                                 robot_depth=robot_depths.get(extra_obs.frame_id),
-                                target_description=decision.target,side_part=original_part)
+                                target_description=decision.target,side_part=initial_side_part)
                             ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
                             stem=out/f'initial_part_reference_{extra_obs.frame_id:03d}'
                             stem.with_suffix('.json').write_text(json.dumps(extra.report,indent=2))
@@ -899,7 +902,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                             np.savez_compressed(stem.with_suffix('.npz'),object_points=extra.ownership.object_points,
                                 object_mask=extra.ownership.object_mask,source_pixels_xy=extra.ownership.source_pixels_xy,
                                 part_points=extra.initial_part_points,part_mask=extra.initial_part_mask,
-                                side_object=original_object,side_part=original_part)
+                                side_object=original_object,side_part=initial_side_part)
                             additional_source_ownership.append((extra.ownership,extra_obs))
                             original_part=np.unique(np.vstack([original_part,extra.initial_part_points]),axis=0)
                             original_part.flags.writeable=False

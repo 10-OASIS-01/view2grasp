@@ -30,7 +30,7 @@ class InitialReferenceResult(ObjectAnnotationResult):
 
 
 def select_initial_part_view(observations, side_obs, side_part, support_z, robot_depths,
-                             *, excluded_frames=(), resolution=.005):
+                             *, excluded_frames=(), resolution=.005, known_part_points=None):
     """Rank existing static images for fresh semantic review, never membership.
 
     Nearby measured material absent from the original part is a hypothesis to
@@ -42,7 +42,10 @@ def select_initial_part_view(observations, side_obs, side_part, support_z, robot
             or not np.isfinite(reference).all() or not np.isfinite(support_z)
             or not np.isfinite(resolution) or resolution<=0):
         raise ValueError('part view selection requires a finite measured reference and positive resolution')
-    tree=cKDTree(reference)
+    known=reference if known_part_points is None else np.asarray(known_part_points)
+    if known.ndim!=2 or known.shape[1:]!=(3,) or len(known)<4 or not np.isfinite(known).all():
+        raise ValueError('part novelty ranking requires finite confirmed material')
+    tree=cKDTree(known)
     lo,hi=reference.min(0)-REFERENCE_MARGIN_M,reference.max(0)+REFERENCE_MARGIN_M
     ranked=[];sources={}
     for obs in observations:
@@ -69,6 +72,7 @@ def select_initial_part_view(observations, side_obs, side_part, support_z, robot
     chosen=sources[ranked[0]['frame_id']] if ranked and ranked[0]['novel_candidate_voxels'] else None
     return chosen,{'scope':'observed geometry ranks a semantic review only; no part or object identity granted',
         'selected_frame':None if chosen is None else chosen.frame_id,'ranked_frames':ranked,
+        'novelty_reference_sha256':_digest(known),'fixed_side_part_sha256':_digest(reference),
         'new_observations':0,'maximum_additional_source_images':1}
 
 
