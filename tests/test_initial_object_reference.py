@@ -58,6 +58,7 @@ def test_fresh_seeded_unanchored_surface_initializes_but_is_not_a_later_anchor_p
     # This geometry could also be an explicitly mislabeled separate neighbor.
     # Initial VLM authority is the assumption, not a geometric identity proof.
     assert 'neighboring object was mislabeled' in owned.report['semantic_identity_limit']
+
     with pytest.raises(ObjectOwnershipError) as failure:
         resolve_object_ownership(obs, decision, reference, 'mug', .9)
     assert failure.value.diagnostics['failure'] == 'unanchored_seeded_component'
@@ -70,6 +71,23 @@ def test_fresh_seeded_unanchored_surface_initializes_but_is_not_a_later_anchor_p
     assert request[3]['force_observe'] and request[3]['annotation_roles'] == ('object',)
     assert result.report['vlm_calls'] == result.report['semantic_requests'] == 1
     assert 'client_mutation' not in str(result.report)
+
+
+def test_first_initial_reply_gets_only_same_pixel_magnification_without_seed_hints():
+    from test_object_annotation import source_scene, reply
+    obs, reference, xyz = source_scene()
+    before = obs.rgb.copy()
+    result, client = initialize(obs, reference, [lambda crop: reply(crop, 'good')])
+    supplied, _, history, options = client.requests[0]
+    diagnostic = options['annotation_diagnostic']
+    diagnostic.validate_source(supplied)
+    assert diagnostic.rejected_pixels == ()
+    assert np.array_equal(diagnostic.rgb[::diagnostic.scale, ::diagnostic.scale], supplied.rgb)
+    assert np.array_equal(obs.rgb, before)
+    assert 'previous_annotation' not in history[0]['initial_object_reference']
+    assert 'geometry_diagnostics' not in history[0]['initial_object_reference']
+    assert result.report['new_observations'] == 0
+    assert np.array_equal(result.ownership.object_points, xyz[210:224, 230:244].reshape(-1, 3))
 
 
 def test_unseeded_ten_mm_neighbor_is_not_flooded_owned_or_exactly_retired():

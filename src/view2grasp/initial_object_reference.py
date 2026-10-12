@@ -356,7 +356,14 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
     transaction = {'initial_object_reference': {'frame_id': source_obs.frame_id,
         'camera_id': source_obs.camera_id, 'target_id': target_id, 'attempt': 0,
         'maximum_semantic_requests': 2, 'image_context': copy.deepcopy(crop.provenance())}}
-    instruction, diagnostic = base_instruction, None
+    instruction = base_instruction
+    # The initial crop can be only ~200 pixels wide. Supply the same normalized
+    # pixel-center magnification on the first reply too, without any labels or
+    # rejected pixels. Depth, K, crop restoration and admission are unchanged.
+    diagnostic = build_annotation_diagnostic(crop.observation, {
+        'frame_id': source_obs.frame_id, 'camera_id': source_obs.camera_id,
+        'coordinate_space': 'supplied_crop_normalized_pixel_centers',
+        'image_shape_hw': list(crop.observation.depth.shape), 'rejected_samples': []})
     repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope', 'insufficient_original_overlap',
         'initial_part_outside_owned_object','initial_part_insufficient_material','initial_part_outside_fixed_envelope'}
     for index in range(2):
@@ -434,7 +441,12 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             'pixels only, not replacement seeds or desired boundaries. For envelope failures, '
             'rejected_geometry_pixels are measured outliers; component_seed_pixels only attribute '
             'which seeds selected that component, not whether those seeds themselves are outliers. '
-            'Use the first unmarked crop for all output coordinates. Omit uncertain material.')
+            'Use the first unmarked crop for all output coordinates. Omit uncertain material. '
+            'If a rejected seed was a speculative click on background or support, omit it; '
+            'do not replace every rejected click just to preserve the old seed count. '
+            'Use a new seed only when you can clearly identify additional object material. '
+            'Unflagged seeds may be retained only if they still match the visible object; '
+            'the entire fresh answer, including those seeds, is revalidated independently.')
         if feedback.get('object_geometry_passed_in_rejected_reply'):
             instruction+=(' Your previous object region and object seeds passed their own geometric checks; '
                 'the transaction failed on the part region. If those object proposals still match visible '
