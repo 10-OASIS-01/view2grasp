@@ -1002,8 +1002,14 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # the unchanged full final lift planner, never execution.
                     if not strict_preview.report['mapping_evidence_available']:
                         if config.initial_multiview_reference and registered_source is None:
-                            source_request=source_pose_recovery(strict_preview.report,last_registration_failure,
-                                side_observation,obs,postclose_views,post_limit-record.observations,source_recovery_used)
+                            selection_timer=time.monotonic()
+                            try:
+                                source_request=source_pose_recovery(strict_preview.report,last_registration_failure,
+                                    side_observation,obs,postclose_views,post_limit-record.observations,source_recovery_used,
+                                    robot=robot,source_candidates=(source_observation,
+                                        *(source for _,source in additional_source_ownership)),
+                                    source_points=ownership_reference)
+                            finally:record.planning_seconds+=time.monotonic()-selection_timer
                         if source_request is None:break
                         source_recovery_used=True
                 coverage_payload=np.vstack([target,measured_owned_points(),measured_contact_points()])

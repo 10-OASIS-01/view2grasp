@@ -3,7 +3,7 @@
 The preview produces view-selection evidence, never an executable path or a
 free-space certificate. Final lift planning still performs its normal search.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import copy
 import time
 
@@ -15,7 +15,57 @@ from .planning import Planner, PlanningBudgetExceeded
 from .transfer_recovery import different_tabletop_view
 
 
-def source_pose_recovery(preview, failure, reference, current, acquired_views, remaining, used):
+def rank_source_pose_views(robot, references, current, points, acquired_views):
+    """Rank at most four actual initial cameras at the CURRENT robot pose.
+
+    Initial object surfaces are only a visibility hypothesis. Rendering is of
+    the known robot alone; a fresh scene observation and annotation are still
+    required. This helper leaves the robot model at the measured current pose.
+    """
+    from .view_advisor import calibrated_visibility
+    from .geometry import project
+    from .payload_registration import _digest
+    points=np.asarray(points,dtype=float)
+    if (not 1<=len(references)<=4 or points.ndim!=2 or points.shape[1:]!=(3,)
+            or not 32<=len(points)<=100000 or not np.isfinite(points).all()):
+        raise ValueError('source view ranking requires bounded cameras and finite initial geometry')
+    ranked=[];sources={};seen=set()
+    try:
+        for source in references:
+            key=(source.frame_id,source.camera_id)
+            if key in seen:continue
+            seen.add(key)
+            view=np.asarray(source.view,dtype=float)
+            if (view.shape!=(3,) or not np.isfinite(view).all()
+                    or source.frame_id>=current.frame_id or source.timestamp>=current.timestamp):
+                raise ValueError('source view ranking requires an actually earlier camera')
+            if (not different_tabletop_view(view,current.view)
+                    or any(not different_tabletop_view(view,prior) for prior in acquired_views)):
+                continue
+            hypothetical=replace(source,q=current.q,gripper_q=current.gripper_q,
+                base_pose=current.base_pose,torso_q=current.torso_q,timestamp=current.timestamp)
+            visible=calibrated_visibility(robot,hypothetical,points,points)
+            uv,_=project(points[visible],source.K,source.T_wc)
+            count=int(np.count_nonzero(visible))
+            ranked.append({'frame_id':source.frame_id,'camera_id':source.camera_id,
+                'view':view.tolist(),'predicted_visible_reference_points':count,
+                'predicted_visible_fraction':count/len(points),
+                'unique_visible_pixels':len(np.unique(np.rint(uv).astype(int),axis=0))})
+            sources[key]=source
+    finally:
+        robot.set_q(current.q,current.gripper_q)
+    ranked.sort(key=lambda row:(-row['predicted_visible_reference_points'],-row['unique_visible_pixels']))
+    selected=(sources[(ranked[0]['frame_id'],ranked[0]['camera_id'])]
+        if ranked and ranked[0]['predicted_visible_reference_points']>=32 else None)
+    return selected,{'ranked_cameras':ranked,'initial_reference_sha256':_digest(points),
+        'minimum_predicted_reference_points':32,'maximum_cameras':4,
+        'robot_state_frame_id':current.frame_id,'new_scene_observations':0,
+        'scope':'Current known robot and INITIAL object-pose hypothesis only; no current '
+            'object pose, identity, free space or contact is certified by this ranking.'}
+
+
+def source_pose_recovery(preview, failure, reference, current, acquired_views, remaining, used,
+                         *, robot=None, source_candidates=(), source_points=None):
     """One budgeted source-view revisit for unresolved measured registration.
 
     This is correspondence evidence acquisition, not invented UNKNOWN coverage.
@@ -26,6 +76,11 @@ def source_pose_recovery(preview, failure, reference, current, acquired_views, r
             or preview.get('mapping_evidence_available') is not False
             or preview.get('occupied_unresolved') is not True):
         return None
+    ranking=None
+    if robot is not None:
+        reference,ranking=rank_source_pose_views(robot,[reference,*source_candidates],
+            current,source_points,acquired_views)
+        if reference is None:return None
     view = np.asarray(reference.view, dtype=float)
     if (view.shape != (3,) or not np.isfinite(view).all()
             or not different_tabletop_view(view, current.view)
@@ -34,6 +89,7 @@ def source_pose_recovery(preview, failure, reference, current, acquired_views, r
     return {'purpose':'source_pose_verification','frame_id':current.frame_id,'camera_id':current.camera_id,
         'reference_frame_id':reference.frame_id,'reference_camera_id':reference.camera_id,
         'reference_view':view.tolist(),'registration_failure':failure,
+        'view_ranking':ranking,
         'registration_verified':False,'remaining_real_observations':remaining,
         'maximum_recovery_observations':1,'acquires_new_observation':True,
         'scope':'Revisit an acquired source viewpoint at the current stationary robot state. '

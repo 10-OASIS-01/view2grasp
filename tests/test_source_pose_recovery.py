@@ -28,6 +28,56 @@ def test_one_explicit_source_revisit_uses_only_real_reference_and_existing_budge
     assert request['registration_verified'] is False and request['acquires_new_observation'] is True
 
 
+def ranked_inputs():
+    from view2grasp.geometry import unproject
+    data=inputs();data['current']=replace(data['current'],timestamp=3.,q=np.full(7,.2))
+    alternate=replace(data['reference'],frame_id=4,view=(60.,30.,1.3))
+    pixels=np.array([[x,y] for y in range(10,22) for x in range(10,22)])
+    points=unproject(pixels,np.ones(len(pixels)),alternate.K,alternate.T_wc)
+    return data,alternate,points
+
+
+def test_source_recovery_ranks_initial_cameras_at_current_robot_pose_without_new_scene_rgbd():
+    data,alternate,points=ranked_inputs();calls=[];restored=[]
+    class Robot:
+        def depth(self,obs):
+            assert np.array_equal(obs.q,data['current'].q)
+            assert np.array_equal(obs.gripper_q,data['current'].gripper_q)
+            calls.append(obs.frame_id)
+            return np.full_like(obs.depth,10. if obs.frame_id==4 else .5)
+        def set_q(self,q,gripper):restored.append((q.copy(),gripper.copy()))
+    before=points.copy()
+    request=source_pose_recovery(**data,robot=Robot(),source_candidates=(alternate,),source_points=points)
+    assert request['reference_frame_id']==4 and request['reference_view']==list(alternate.view)
+    assert request['maximum_recovery_observations']==1 and calls==[2,4]
+    assert np.array_equal(points,before) and np.array_equal(restored[-1][0],data['current'].q)
+    ranking=request['view_ranking']
+    assert ranking['new_scene_observations']==0 and ranking['robot_state_frame_id']==9
+    assert ranking['ranked_cameras'][0]['predicted_visible_reference_points']==len(points)
+    data['acquired_views'].append(alternate.view)
+    assert source_pose_recovery(**data,robot=Robot(),source_candidates=(alternate,),source_points=points) is None
+    # No source image is consumed for an unrelated failure, even with candidates.
+    data['failure']='invalid_input';calls.clear()
+    assert source_pose_recovery(**data,robot=Robot(),source_candidates=(alternate,),source_points=points) is None
+    assert not calls
+
+
+def test_source_ranking_rejects_noninitial_cameras_and_restores_current_model_on_error():
+    from view2grasp.postclose_preview import rank_source_pose_views
+    data,alternate,points=ranked_inputs();restored=[]
+    class Robot:
+        def depth(self,obs):raise RuntimeError('self-depth unavailable')
+        def set_q(self,q,gripper):restored.append(q.copy())
+    future=replace(alternate,frame_id=data['current'].frame_id)
+    with pytest.raises(ValueError,match='earlier camera'):
+        rank_source_pose_views(Robot(),[future],data['current'],points,[])
+    with pytest.raises(RuntimeError,match='self-depth unavailable'):
+        rank_source_pose_views(Robot(),[alternate],data['current'],points,[])
+    assert len(restored)==2 and all(np.array_equal(q,data['current'].q) for q in restored)
+    with pytest.raises(ValueError,match='bounded cameras'):
+        rank_source_pose_views(Robot(),[alternate]*5,data['current'],points,[])
+
+
 @pytest.mark.parametrize('fault',['used','budget','boolean_budget','missing','unknown','clear',
     'unrelated_failure','same_current','already_acquired','nonfinite'])
 def test_no_revisit_without_unresolved_pose_and_a_distinct_budgeted_source_view(fault):
