@@ -34,8 +34,8 @@ class ObjectAnnotationResult:
         return self.attempts[-1].ownership if self.attempts else None
 
 
-def _instruction(target_id, description):
-    return (
+def _instruction(target_id, description, *, material_mask=False):
+    instruction = (
         f'Annotate ONLY the supplied already acquired source-image crop. The target identity is '
         f'{target_id}: {description or target_id}. Mark the complete clearly visible material of '
         'that same object, including any visually identifiable inner wall or inner bottom. '
@@ -53,6 +53,26 @@ def _instruction(target_id, description):
         'refer to THIS unresized supplied crop. This is source-pose evidence only, with no claim '
         'that historical points describe a currently held pose. No contact, map retirement or '
         'free-space permission is granted by this annotation request.')
+    if material_mask:
+        instruction=instruction.replace('whole-object box, polygon or mask','whole-object polygon or pixel mask')
+        instruction=instruction.replace('with positive seeds on each clearly identifiable visible surface region.',
+            'with ONE confident interior positive seed on clearly visible object material.')
+        instruction=instruction.replace('These seeds establish object membership,',
+            'The explicit material region establishes object membership; separate seeds check validity,')
+        instruction=instruction.replace('A box can contain background; measured component filters will run.',
+            'Every selected valid material pixel must satisfy the fixed measured reference envelope.')
+        instruction+=(' This request uses EXPLICIT MATERIAL labels: return a NEW polygon or pixel mask '
+            'whose included depth-valid non-robot, non-support pixels are ALL visibly identified as '
+            'this object material. A detection box is not accepted. Include clearly visible inner '
+            'wall/bottom and handle material, using holes or a pixel mask to exclude empty aperture, '
+            'background and independent objects; never fill invisible material. Separate valid '
+            'positive object evidence is still required: one confident interior seed is sufficient, '
+            'because the material region supplies the pixel labels. Do not scatter unnecessary '
+            'clicks across thin silhouettes or uncertain inner surfaces. Any invalid seed or '
+            'measured material outside the fixed reference envelope '
+            'rejects the WHOLE reply; no accepted subset or old reply is reused. If you cannot '
+            'visually identify a surface, leave it outside the material region.')
+    return instruction
 
 
 def _correction_feedback(crop, diagnostics, source_reply):
@@ -148,7 +168,7 @@ def _correction_feedback(crop, diagnostics, source_reply):
 
 def annotate_source_object(vlm, source_obs, original_object, target_id, support_z, *,
                            robot_depth=None, allow_partial_seed_components=False,
-                           target_description='') -> ObjectAnnotationResult:
+                           target_description='',material_mask=False) -> ObjectAnnotationResult:
     """At most two semantic replies on one fixed source crop and reference.
 
     Measured rejection, abstention or unresolved components permit one correction. Invalid
@@ -163,6 +183,7 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
         'target_id': target_id, 'maximum_semantic_requests': 2, 'new_observations': 0,
         'map_modified': False, 'contact_permission_changed': False,
         'source_pose_only': True, 'reply_results_merged': False}
+    if material_mask:report['explicit_material_mask']=True
     attempts = []
 
     def finish():
@@ -190,7 +211,7 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
         source_rgb_sha256=hashlib.sha256(source_obs.rgb.tobytes()).hexdigest(),
         crop_rgb_sha256=hashlib.sha256(crop.observation.rgb.tobytes()).hexdigest(),
         original_reference_sha256=hashlib.sha256(reference.tobytes()).hexdigest())
-    instruction = _instruction(target_id, target_description)
+    instruction = _instruction(target_id, target_description,material_mask=material_mask)
     transaction = {'source_object_annotation': {'frame_id': source_obs.frame_id,
         'camera_id': source_obs.camera_id, 'target_id': target_id,
         'image_context': copy.deepcopy(context), 'attempt': 0, 'maximum_semantic_requests': 2}}
@@ -202,7 +223,8 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
         'coordinate_space':'supplied_crop_normalized_pixel_centers',
         'image_shape_hw':list(crop.observation.depth.shape),'rejected_samples':[]})
     repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope',
-        'unanchored_seeded_component', 'insufficient_original_overlap', 'no_accepted_components'}
+        'unanchored_seeded_component', 'insufficient_original_overlap', 'no_accepted_components',
+        'material_mask_required','material_outside_fixed_envelope'}
     for index in range(2):
         log = {'index': index, 'request_history': copy.deepcopy([transaction]),
             'diagnostic': None if diagnostic is None else diagnostic.provenance()}
@@ -218,7 +240,8 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
             source_reply = crop.restore_decision(raw)
             log['source_annotation'] = source_reply.model_dump(mode='json')
             ownership = resolve_object_ownership(source_obs, source_reply, reference, target_id,
-                support_z, robot_depth, allow_partial_seed_components=allow_partial_seed_components)
+                support_z, robot_depth, allow_partial_seed_components=allow_partial_seed_components,
+                material_mask=material_mask)
             log['ownership'] = copy.deepcopy(ownership.report)
             if (ownership.report.get('abstentions') or
                     ownership.report.get('unresolved_measured_components')):
@@ -246,7 +269,7 @@ def annotate_source_object(vlm, source_obs, original_object, target_id, support_
             'image_context': copy.deepcopy(context), 'attempt': 1, 'maximum_semantic_requests': 2,
             'previous_annotation': copy.deepcopy(log['raw_annotation']),
             'geometry_diagnostics': feedback}}
-        instruction = _instruction(target_id, target_description) + (
+        instruction = _instruction(target_id, target_description,material_mask=material_mask) + (
             ' This is the ONE correction of your previous reply on the SAME unmarked crop. '
             'Reinspect the entire visible object and return a fresh complete region plus explicit '
             'positive seeds. Do not mechanically move or just delete rejected clicks. The second '

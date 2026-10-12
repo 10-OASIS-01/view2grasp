@@ -21,7 +21,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                   complete_lift=False, max_observations=4, initialize_reference=False,
                   initialization_ok=True, initial_identity=True, initialize_part=False, part_initialization_ok=True,
                   pose_recovery=False,recovery_registration_ok=False,recovery_failure='ambiguous_local_pose',
-                  pose_recovery_at=0,initialize_part_count=1,fail_part_frame=None,source_pose_views=1):
+                  pose_recovery_at=0,initialize_part_count=1,fail_part_frame=None,source_pose_views=1,current_material=False):
     from view2grasp import recording, runner
     sample, xyz, mask, original = scene()
     part_mask = np.zeros_like(mask); part_mask[6:10, 2:4] = True
@@ -42,7 +42,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     evidence = SimpleNamespace(events=[], annotations=[], registrations=[], retired=[],
         advice=[], targets=[], source_certificates=[], observations=[], executed=[],
         track_calls=[], removals=[], initializations=[], registration_references=[],
-        operation_order=[],camera_requests=[], original=original, source_points=source_points,
+        operation_order=[],camera_requests=[],material_modes=[], original=original, source_points=source_points,
         current_points=current_points, predicted=predicted, neighbor=neighbor,
         candidate=candidate, original_ray=candidate.approach.copy())
     evidence.extra_initial_part=source_points[-4:].copy()
@@ -174,10 +174,12 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         assert identity == 'mug' and kwargs['allow_partial_seed_components']
         assert kwargs['robot_depth'].shape == obs.depth.shape
         evidence.annotations.append((obs.frame_id, reference.copy()))
+        evidence.material_modes.append((obs.frame_id,kwargs.get('material_mask',False)))
         vlm.calls += 1
         accepted = source_ok if obs.frame_id == 1 else current_ok
         ownership = resolve_object_ownership(obs, annotation(obs, mask), reference,
-            identity, support, kwargs['robot_depth'], allow_partial_seed_components=True) if accepted else None
+            identity, support, kwargs['robot_depth'], allow_partial_seed_components=True,
+            material_mask=kwargs.get('material_mask',False)) if accepted else None
         return SimpleNamespace(ownership=ownership, report={'semantic_requests': 1, 'vlm_calls': 1,
             'accepted': accepted})
 
@@ -274,7 +276,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         config=runner.ExperimentConfig(max_observations=max_observations, source_object_ownership=enabled,
             initial_multiview_reference=initialize_reference,initial_multiview_part=initialize_part,
             initial_part_views=initialize_part_count if initialize_part else 1,
-            source_pose_recovery_views=source_pose_views))
+            source_pose_recovery_views=source_pose_views,current_object_material_mask=current_material))
     expected_failure = ('execution: evaluator success criterion not met' if complete_lift
         else 'planning: lift deliberate lifecycle stop')
     if initialize_reference and not initialization_ok:

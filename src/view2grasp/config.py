@@ -27,6 +27,7 @@ class ExperimentConfig(BaseModel):
     # acquired overview and side view before freezing reassociation references.
     initial_multiview_reference: bool = False
     initial_object_material_mask: bool = False
+    current_object_material_mask: bool = False
     initial_multiview_part: bool = False
     initial_part_views: int = Field(default=1,ge=1,le=2)
     source_pose_recovery_views: int = Field(default=1,ge=1,le=2)
@@ -61,6 +62,8 @@ class ExperimentConfig(BaseModel):
             raise ValueError('initial multiview part requires initial multiview object reference')
         if self.initial_object_material_mask and not self.initial_multiview_reference:
             raise ValueError('explicit initial material requires initial multiview object reference')
+        if self.current_object_material_mask and not self.initial_multiview_reference:
+            raise ValueError('explicit current material requires initial multiview object reference')
         if self.initial_part_views!=1 and not self.initial_multiview_part:
             raise ValueError('additional initial part views require explicit part initialization')
         if self.source_pose_recovery_views!=1 and not self.initial_multiview_reference:

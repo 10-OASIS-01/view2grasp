@@ -794,7 +794,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 started=time.monotonic();inference_before=vlm.seconds
                 result=annotate_source_object(vlm,observation,reference,ownership_identity,map_.table_z,
                     robot_depth=robot_depths.get(observation.frame_id),allow_partial_seed_components=True,
-                    target_description=decision.target)
+                    target_description=decision.target,
+                    material_mask=config.current_object_material_mask and phase=='postclose')
                 ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
                 name=f'object_ownership_{phase}_{observation.frame_id:03d}'
                 (out/(name+'.json')).write_text(json.dumps(result.report,indent=2))

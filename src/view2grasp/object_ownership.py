@@ -110,7 +110,8 @@ class ObjectOwnership:
 
 def resolve_object_ownership(obs: Observation, decision: AgentDecision,
                              original_reference, target_id: str, support_z: float,
-                             robot_depth=None, *, allow_partial_seed_components=False) -> ObjectOwnership:
+                             robot_depth=None, *, allow_partial_seed_components=False,
+                             material_mask=False) -> ObjectOwnership:
     """Validate explicitly seeded whole components inside one object region.
 
     The region can be a box, polygon or mask; only separate ``object/points``
@@ -126,12 +127,21 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
     partial mode abstains from each failure and requires FOUR original anchor
     pixels in EACH accepted complete component. It never trims a failed
     component or moves a seed. Abstention is not contact or object permission.
+
+    Explicit material mode is a separate, atomic semantic contract: a FRESH
+    polygon/mask labels every selected measured material pixel. It cannot be
+    applied to a detection box or an old seeded reply. It retains the fixed
+    envelope, independent reference anchors and self/support filters, but does
+    not require a separate seed in each depth fragment. Identity depends on
+    that new semantic label, not on geometry proving neighboring-object identity.
     """
     report = {'frame_id': obs.frame_id, 'camera_id': obs.camera_id,
         'target_id': target_id, 'scope': 'source_image_object_ownership_only',
         'grants_contact_permission': False, 'grasp_ray_changed': False,
         'map_modified': False, 'grants_free_space': False,
         'allow_partial_seed_components': bool(allow_partial_seed_components)}
+    if material_mask:
+        report.update(allow_partial_seed_components=False,explicit_material_mask=True)
 
     def reject(reason, message, **details):
         raise ObjectOwnershipError(message, {**report, 'failure': reason, **details})
@@ -150,6 +160,8 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
     if len(regions) != 1 or not seeds or any(g.kind not in ('box', 'polygon', 'mask', 'points')
                                           for g in proposals):
         reject('region_and_seeds_required', 'object ownership requires one region and explicit object positive seeds')
+    if material_mask and regions[0].kind not in ('polygon','mask'):
+        reject('material_mask_required','explicit material needs a fresh polygon or mask, never a detection box')
     reference = np.asarray(original_reference, dtype=float)
     if (reference.ndim != 2 or reference.shape[1:] != (3,) or len(reference) < 4 or
             not np.isfinite(reference).all()):
@@ -194,7 +206,7 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
             details = {'seed_pixel': [int(x), int(y)], 'seed_indices': [seed_index],
                 'source_pixels_xy': [[int(x), int(y)]], 'reasons': reasons,
                 'inside_semantic_region': bool(semantic[y, x]), 'valid_filtered_depth': bool(valid[y, x])}
-            if not allow_partial_seed_components:
+            if not allow_partial_seed_components or material_mask:
                 reject('invalid_explicit_seed', 'object ownership seed is not on valid explicit object evidence', **details)
             abstained[y, x] = True
             abstentions.append({'failure': 'invalid_explicit_seed', **details})
@@ -208,6 +220,25 @@ def resolve_object_ownership(obs: Observation, decision: AgentDecision,
             'minimum_component_anchor_pixels': 4 if allow_partial_seed_components else 1},
         proposed_region_pixels=int(semantic.sum()), valid_region_pixels=int(candidate.sum()))
     reference_tree = cKDTree(reference)
+    if material_mask:
+        yy,xx=np.where(candidate);points=xyz[candidate]
+        outside=np.any((points<lo)|(points>hi),axis=1)
+        if outside.any():
+            reject('material_outside_fixed_envelope','explicit material leaves the fixed original envelope',
+                rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=np.column_stack([xx,yy])[outside][:12].tolist())
+        anchors=int(np.count_nonzero(reference_tree.query(points)[0]<ANCHOR_DISTANCE_M))
+        if anchors<4:
+            reject('insufficient_original_overlap','explicit material needs four independent original anchors',anchor_pixels=anchors)
+        report.update(membership_authority='fresh_vlm_dense_material_region',
+            component_seed_gate_applied=False,selected_region_kind=regions[0].kind,
+            anchor_pixels=anchors,object_pixels=len(points),source_timestamp=float(obs.timestamp),
+            partial=False,abstentions=[],abstained_source_pixels=0,source_pose_only=True,
+            rigid_attachment_mapping_required_before_carrying=True,
+            semantic_identity_limit='Fresh pixel-level VLM material labels supply identity; fixed geometry does not prove a nearby object was not mislabeled.')
+        report['thresholds'].update(component_step_inclusive_m=None,minimum_component_anchor_pixels=None)
+        return ObjectOwnership(_readonly(candidate),_readonly(points),_readonly(np.column_stack([xx,yy])),
+            _readonly(obs.depth[candidate]),obs.frame_id,obs.camera_id,_source_digest(obs),
+            _readonly(np.empty((0,2),int)),_readonly(np.empty((0,3))),report)
     selected = np.zeros((h, w), dtype=bool)
     labels = np.full((h, w), -1, dtype=int)
     outcomes = []

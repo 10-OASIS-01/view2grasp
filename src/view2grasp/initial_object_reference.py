@@ -408,19 +408,17 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         'geometric admission envelope and overall overlap, not labels for new source surfaces.')
     roles=('object',)
     if material_mask:
-        base_instruction = _instruction(target_id, target_description).replace(
-            'exactly ONE tight whole-object box, polygon or mask',
-            'exactly ONE explicit material polygon or pixel mask (NO box)').replace(
-            'A box can contain background; measured component filters will run.',
-            'Your polygon/mask explicitly labels EVERY depth-valid selected pixel as this object material.')
+        base_instruction = _instruction(target_id, target_description,material_mask=True).replace(
+            'whole-object polygon or pixel mask','explicit material polygon or pixel mask (NO box)')
         base_instruction += (
+            ' Your polygon/mask explicitly labels EVERY depth-valid selected pixel as this object material.'
             ' This is a NEW dense-material initialization BEFORE any robot motion, not a detection box '
             'or a sparse-seed component annotation. Trace the complete visible object material including '
             'clearly identifiable inner wall and inner bottom. A slanted surface can have many isolated '
             'depth samples; your explicit material region labels them directly, without filling in depth '
             'or inferring ownership from neighboring seeds. Use polygon holes for open gaps or independent '
-            'objects; never label the support or robot as object material. Also supply sparse confident '
-            'object-membership seeds inside your material region. The unchanged support, self-depth, '
+            'objects; never label the support or robot as object material. One confident interior '
+            'object seed is sufficient for this dense contract. The unchanged support, self-depth, '
             'fixed side-view envelope and independent side-overlap checks all apply. Any invalid seed '
             'or selected material outside that envelope rejects the complete answer. Uncertain material '
             'must be omitted. This label grants no contact permission, source retirement or FREE space; '
