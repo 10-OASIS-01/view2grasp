@@ -128,6 +128,27 @@ def test_part_view_selection_does_not_create_membership_or_select_filtered_backg
     assert selected is None and report['selected_frame'] is None
 
 
+def test_novel_nearby_material_cannot_nominate_a_view_with_an_occluded_original_part():
+    side,_,_,reference=scene(end=8)
+    candidate,_,_,_=neighbor_scene()
+    depth=candidate.depth.copy();depth[6:10,2:4]=.8
+    blocked=replace(candidate,frame_id=9,depth=depth)
+    visible=replace(candidate,frame_id=10)
+    depths={i:np.full_like(depth,10.) for i in (9,10)}
+    chosen,report=select_initial_part_view([blocked],side,reference,.9,depths)
+    assert chosen is None
+    row=report['ranked_frames'][0]
+    assert row['novel_candidate_voxels']>0
+    assert row['projected_original_part_in_envelope_fraction']==0
+    assert not row['eligible_for_semantic_review']
+    chosen,report=select_initial_part_view([blocked,visible],side,reference,.9,depths)
+    assert chosen is visible
+    assert report['ranked_frames'][0]['projected_original_part_in_envelope_fraction']==1
+    # Self depth also makes the same candidate ineligible; RGB-D is unchanged.
+    depths[10]=np.zeros_like(depth)
+    assert select_initial_part_view([visible],side,reference,.9,depths)[0] is None
+
+
 @pytest.mark.parametrize('reference',[np.empty((0,3)),np.full((4,3),np.nan),np.zeros(4)])
 def test_invalid_part_view_reference_fails_explicitly(reference):
     side,_,_,_=scene()

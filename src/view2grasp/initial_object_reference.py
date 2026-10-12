@@ -62,17 +62,34 @@ def select_initial_part_view(observations, side_obs, side_part, support_z, robot
         valid=(np.isfinite(xyz).all(2)&(current.depth>.05)&(current.depth<10)
             &(xyz[:,:,2]>support_z+.006)&np.isfinite(crop.robot_depth)
             &(current.depth<crop.robot_depth-.003)&np.all((xyz>=lo)&(xyz<=hi),axis=2))
+        # Novel nearby material alone is a poor view-quality score: most of
+        # the actual part may be behind the cup or robot. Require a majority
+        # of the ORIGINAL part projection to land on valid in-envelope depth.
+        # This is only eligibility for a fresh VLM review, never membership or
+        # proof that an occluder inside that envelope is the requested part.
+        uv,z=project(reference,current.K,current.T_wc)
+        h,w=current.depth.shape
+        in_image=(np.isfinite(uv).all(1)&np.isfinite(z)&(z>0)
+            &np.all(uv>=-.5,axis=1)&np.all(uv<[w-.5,h-.5],axis=1))
+        ij=np.rint(uv[in_image]).astype(int)
+        visible=int(np.count_nonzero(valid[ij[:,1],ij[:,0]]))
+        visibility=visible/len(reference)
         points=xyz[valid]
         novel=points[tree.query(points)[0]>=ANCHOR_DISTANCE_M] if len(points) else points
         voxels=len(np.unique(np.round(novel/resolution).astype(np.int64),axis=0))
         ranked.append({'frame_id':obs.frame_id,'camera_id':obs.camera_id,
-            'measured_candidate_pixels':len(points),'novel_candidate_voxels':voxels})
+            'measured_candidate_pixels':len(points),'novel_candidate_voxels':voxels,
+            'projected_original_part_in_envelope_fraction':visibility,
+            'eligible_for_semantic_review':visibility>=.5})
         sources[obs.frame_id]=obs
-    ranked.sort(key=lambda r:(-r['novel_candidate_voxels'],r['frame_id']))
-    chosen=sources[ranked[0]['frame_id']] if ranked and ranked[0]['novel_candidate_voxels'] else None
+    ranked.sort(key=lambda r:(not r['eligible_for_semantic_review'],-r['novel_candidate_voxels'],r['frame_id']))
+    chosen=(sources[ranked[0]['frame_id']] if ranked and ranked[0]['eligible_for_semantic_review']
+        and ranked[0]['novel_candidate_voxels'] else None)
     return chosen,{'scope':'observed geometry ranks a semantic review only; no part or object identity granted',
         'selected_frame':None if chosen is None else chosen.frame_id,'ranked_frames':ranked,
         'novelty_reference_sha256':_digest(known),'fixed_side_part_sha256':_digest(reference),
+        'minimum_projected_original_part_in_envelope_fraction':.5,
+        'view_quality_scope':'Measured depth at the projected original part only ranks review eligibility; no semantic identity, accepted mask, contact or FREE evidence.',
         'new_observations':0,'maximum_additional_source_images':1}
 
 
