@@ -208,12 +208,7 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
         if not robot_clear[yy, xx]: reasons.append('robot_occluded_or_unverified')
         invalid_seeds.append({'failure': 'invalid_explicit_seed',
             'seed_indices': [index], 'seed_pixel': [int(xx), int(yy)], 'reasons': reasons})
-    if invalid_seeds:
-        # Report every measured invalid click in the one bounded correction.
-        # The entire answer still fails; no valid subset becomes ownership.
-        reject('invalid_explicit_seed', 'initial object membership seeds are not valid source evidence',
-            **{k: v for k, v in invalid_seeds[0].items() if k != 'failure'},
-            invalid_seed_count=len(invalid_seeds), abstentions=invalid_seeds)
+    failures = list(invalid_seeds)
 
     lo = side_reference.min(axis=0)-REFERENCE_MARGIN_M
     hi = side_reference.max(axis=0)+REFERENCE_MARGIN_M
@@ -227,6 +222,8 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
     labels = np.full((h, w), -1, int)
     components = []
     for index, (xx, yy) in enumerate(seed_pixels):
+        if not candidate[yy, xx]:
+            continue
         if labels[yy, xx] >= 0:
             components[labels[yy, xx]]['seed_indices'].append(index)
             continue
@@ -246,15 +243,23 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
         points = xyz[yx[:, 0], yx[:, 1]]
         outside = np.any((points < lo) | (points > hi), axis=1)
         anchors = int(np.count_nonzero(tree.query(points)[0] < ANCHOR_DISTANCE_M))
+        component_seeds = [index]
         if outside.any():
-            reject('component_outside_fixed_envelope', 'complete initial component leaves the fixed side envelope',
-                seed_indices=[index], component_pixels=len(points), original_anchor_pixels=anchors,
-                rejected_pixel_count=int(outside.sum()), rejected_pixels_xy=yx[outside][:12, ::-1].tolist())
-        components.append({'pixels': len(points), 'seed_indices': [index],
+            failures.append({'failure': 'component_outside_fixed_envelope',
+                'seed_indices': component_seeds, 'component_pixels': len(points), 'original_anchor_pixels': anchors,
+                'rejected_pixel_count': int(outside.sum()), 'rejected_pixels_xy': yx[outside][:12, ::-1].tolist()})
+        components.append({'pixels': len(points), 'seed_indices': component_seeds,
             'side_anchor_pixels': anchors, 'original_anchor_pixels': anchors,
             'membership_authority': 'fresh_initial_vlm_semantics',
             'independent_side_overlap': bool(anchors),
             'satisfies_later_four_anchor_component_gate': anchors >= 4})
+    if failures:
+        # One correction sees every actual seed/component failure together.
+        # Traversal is diagnostic only: any failure rejects the whole answer.
+        first = failures[0]
+        reject(first['failure'], 'initial object selection contains invalid seeds or out-of-envelope components',
+            **{k: v for k, v in first.items() if k != 'failure'},
+            invalid_seed_count=len(invalid_seeds), abstentions=failures)
     total_anchors = sum(component['side_anchor_pixels'] for component in components)
     if total_anchors < 4:
         reject('insufficient_original_overlap', 'initial source selection needs four anchors against the side reference',

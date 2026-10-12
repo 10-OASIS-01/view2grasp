@@ -332,3 +332,5 @@ MUJOCO_GL=cgl uv run view2grasp replay \
 每张初始图的源归属独立保存。只有当前实测配准通过且全部源点的变换已纳入载物碰撞包络，才按各自原图的精确端点来源退休；变换预测不得成为实测来源证书或接触点，retained、UNKNOWN及占据检查不变。57项定向测试通过，补充漏带源云时不得退休的回归后，完整原生回归 **1104 项通过**（18.55 s），见 `artifacts/handoff/regression-m1-initial-part-reference.log`。尚待新真实标注与完整在线验收，不据单测宣称完成M1。
 
 真实客户端预检发现新 helper 传入的双角色覆盖参数被已有 object-only 专用接口拒绝；**0 次 HTTP**，没有图像发送或机器人执行。修复为复用原有默认 object＋part 强制标注契约，物体单独模式保持原接口。补充真实 VLM 请求构造／mock transport 集成测试，54项定向测试通过；原准备与拒绝记录保留在 `artifacts/handoff/mug-23-initial-part-probe/`，新验证使用单独目录。
+
+`c83b5ee` 接口修复完整回归1105项通过。自动选中的第7图两次新官方回复均严格失败：初答同时有2个支撑种子和1个越界组件，但反馈此前提前终止于支撑种子；纠错答仍播种了该越界背景。原图与原答保留于 `mug-23-initial-part-probe-v2/`，不计任务成功。改为一次遍历报告全部非法种子与完整越界组件，不接受合法子集，不扩大两答预算或门限。离线重验该首答恰好报告三处失败，见 `mug-23-initial-mixed-feedback.json`；78项定向回归和完整原生 **1106项**（18.14 s）通过，日志 `regression-m1-initial-all-failures.log`。

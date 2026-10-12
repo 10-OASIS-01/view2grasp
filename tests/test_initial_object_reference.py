@@ -224,3 +224,21 @@ def test_nonzero_crop_coordinates_restore_to_exact_source_pixels():
     assert client.requests[0][0].depth.shape == (y1-y0, x1-x0)
     assert np.array_equal(result.ownership.object_points, xyz[210:224, 230:244].reshape(-1, 3))
     assert result.ownership.source_pixels_xy.min(axis=0).tolist() == [230, 210]
+
+
+def test_mixed_invalid_seeds_and_outside_components_share_one_atomic_correction():
+    obs, _, mask, reference = neighbor_scene()
+    depth=obs.depth.copy();depth[12:14,50:52]=1.;depth[12:14,58:60]=1.
+    obs=replace(obs,depth=depth)
+    mask[12:14,50:52]=True;mask[12:14,58:60]=True
+    first=annotation(obs,mask,seeds=((2,6),(9,6),(1,6),(50,12),(51,13),(58,12)))
+    second=annotation(obs,mask,seeds=((2,6),(9,6)))
+    result,client=initialize(obs,reference,[first,second])
+    assert result.attempts[0].ownership is None and result.ownership is not None
+    failures=result.attempts[0].log['diagnostics']['abstentions']
+    assert [f['failure'] for f in failures]==['invalid_explicit_seed','component_outside_fixed_envelope','component_outside_fixed_envelope']
+    assert [f['seed_indices'] for f in failures]==[[2],[3,4],[5]]
+    feedback=client.requests[1][2][0]['initial_object_reference']['geometry_diagnostics']
+    assert len(feedback['failures'])==3 and len(client.requests)==2
+    assert not result.ownership.object_mask[12:,50:].any()
+    assert not result.report['reply_results_merged']
