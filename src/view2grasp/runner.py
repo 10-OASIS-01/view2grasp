@@ -833,7 +833,14 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 try:
                     sources=np.vstack([source_ownership.object_points,
                         *(owned.object_points for owned,_ in additional_source_ownership)])
-                    registration=register_payload_source(original_object,measured,sources)
+                    # Once explicitly initialized, all static source views
+                    # constrain the rigid fit. A single side view can align a
+                    # near-symmetric face while misplacing the unseen side.
+                    # This immutable reference contains no post-close points;
+                    # current measured evidence remains the separate target.
+                    fit_reference=(ownership_reference if config.initial_multiview_reference
+                        else original_object)
+                    registration=register_payload_source(fit_reference,measured,sources)
                 except PayloadRegistrationError as exc:
                     last_registration_failure=exc.report.get('failure')
                     event('source_payload_registration_rejected',frame_id=frame_id,diagnostics=exc.report)

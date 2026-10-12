@@ -11,6 +11,9 @@ def test_initial_reference_is_frozen_before_execution_and_remains_separate(tmp_p
     reference=np.load(tmp_path/'mug_active_0003/initial_ownership_reference.npy')
     assert np.array_equal(reference,np.vstack([e.original,e.source_points]))
     assert all(np.array_equal(points,reference) for _,points in e.annotations)
+    assert e.registration_references
+    assert all(np.array_equal(points,reference) for points in e.registration_references)
+    assert all(not _contains(points,e.current_points) for points in e.registration_references)
     assert all(np.array_equal(points,e.original) for points in e.targets)
     assert np.array_equal(e.candidate.approach,e.original_ray)
     assert _contains(e.map.surface,e.neighbor[None])
@@ -46,7 +49,7 @@ def test_default_keeps_old_source_annotation_transaction(tmp_path,monkeypatch):
     assert [frame for frame,_ in e.annotations]==[1,2,3,4]
 
 
-def test_complementary_initial_part_keeps_ray_and_side_registration_but_tracks_each_source(tmp_path,monkeypatch):
+def test_complementary_initial_part_keeps_ray_and_fits_all_static_sources(tmp_path,monkeypatch):
     result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,max_observations=6)
     assert len(e.initializations)==2 and result['attempts']==1
     assert [(a,b) for a,b,_ in e.initializations]==[(1,3),(2,3)]
@@ -58,6 +61,8 @@ def test_complementary_initial_part_keeps_ray_and_side_registration_but_tracks_e
     assert not e.map.contact_allowed(e.predicted).any()
     assert _contains(e.source_certificates[-1],e.source_points)
     assert len(e.planner.registered_payload_local)==2*len(e.predicted)
+    reference=np.load(tmp_path/'mug_active_0003/initial_ownership_reference.npy')
+    assert all(np.array_equal(points,reference) for points in e.registration_references)
 
 
 def test_part_failure_stops_before_any_action_and_does_not_use_primary_success_as_fallback(tmp_path,monkeypatch):
@@ -82,6 +87,9 @@ def test_two_complementary_views_keep_the_original_side_envelope_and_all_source_
     assert [(a,b) for a,b,_ in e.initializations]==[(1,4),(2,4),(3,4)]
     assert [f for f,_ in e.retired]==[1,2,3,5,6,7]
     assert len(e.planner.registered_payload_local)==3*len(e.predicted)
+    reference=np.load(tmp_path/'mug_active_0003/initial_ownership_reference.npy')
+    assert len(reference)==len(e.original)+3*len(e.source_points)
+    assert e.registration_references and all(np.array_equal(points,reference) for points in e.registration_references)
     assert np.array_equal(e.candidate.approach,e.original_ray)
     assert not e.map.contact_allowed(e.predicted).any()
 

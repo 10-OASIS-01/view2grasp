@@ -41,7 +41,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         1., 0., surface_point=original[0], grasp_center=original[0])
     evidence = SimpleNamespace(events=[], annotations=[], registrations=[], retired=[],
         advice=[], targets=[], source_certificates=[], observations=[], executed=[],
-        track_calls=[], removals=[], initializations=[],
+        track_calls=[], removals=[], initializations=[], registration_references=[],
         operation_order=[],camera_requests=[], original=original, source_points=source_points,
         current_points=current_points, predicted=predicted, neighbor=neighbor,
         candidate=candidate, original_ray=candidate.approach.copy())
@@ -180,7 +180,11 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             'accepted': accepted})
 
     def register(reference, measured, source):
-        assert np.array_equal(reference, original)
+        expected=(np.vstack([original,*([source_points]*(1+initialize_part_count if initialize_part else 1))])
+            if initialize_reference else original)
+        assert np.array_equal(reference, expected)
+        if initialize_reference:assert not reference.flags.writeable
+        evidence.registration_references.append(reference.copy())
         assert np.array_equal(source,np.vstack([source_points]*(1+initialize_part_count)) if initialize_part else source_points)
         evidence.registrations.append(measured.copy())
         # No acquired current surface means no registration, even if the old
