@@ -9,10 +9,10 @@ import yaml
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     # Six remains the frozen default. Targeted perception development may use
-    # up to four extra closed-loop views for handled / holed geometry. The
+    # up to six extra closed-loop views for handled / holed geometry. The
     # explicitly named development config records this larger evidence budget;
     # comparisons must use the same budget and UNKNOWN remains unchanged.
-    max_observations: int = Field(default=6, ge=2, le=10)
+    max_observations: int = Field(default=6, ge=2, le=12)
     # Opt-in occluded pick/place reserve: held-object verification followed by
     # at most one observation of an actually rejected transfer UNKNOWN region.
     # Zero preserves the previous tabletop observation allocation.
@@ -26,6 +26,7 @@ class ExperimentConfig(BaseModel):
     # Opt-in mug initialization: establish explicit object material from the
     # acquired overview and side view before freezing reassociation references.
     initial_multiview_reference: bool = False
+    initial_object_material_mask: bool = False
     initial_multiview_part: bool = False
     initial_part_views: int = Field(default=1,ge=1,le=2)
     # Mug development: share the existing search budget across candidate poses
@@ -57,6 +58,8 @@ class ExperimentConfig(BaseModel):
             raise ValueError('initial multiview reference requires source object ownership')
         if self.initial_multiview_part and not self.initial_multiview_reference:
             raise ValueError('initial multiview part requires initial multiview object reference')
+        if self.initial_object_material_mask and not self.initial_multiview_reference:
+            raise ValueError('explicit initial material requires initial multiview object reference')
         if self.initial_part_views!=1 and not self.initial_multiview_part:
             raise ValueError('additional initial part views require explicit part initialization')
         return self

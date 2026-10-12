@@ -23,7 +23,10 @@ def tabletop_observation_budget(task, maximum, postlift_observations=0):
     reserved = postlift_observations if task == 'occluded' else 0
     if reserved < 0 or reserved > 2 or maximum - reserved < 2:
         raise ValueError('post-lift reserve requires an initial and a post-close observation')
-    postclose = min(3 if task == 'mug' else 2, maximum - reserved - 1)
+    # Mug budgets above ten keep the seven-view pregrasp cap. Extra views
+    # verify the full registered payload after its pose becomes observable.
+    desired = min(5,3+max(0,maximum-10)) if task=='mug' else 2
+    postclose = min(desired, maximum - reserved - 1)
     return TabletopObservationBudget(maximum - reserved - postclose,
         maximum - reserved, postclose, reserved)
 

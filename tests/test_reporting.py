@@ -14,7 +14,8 @@ def test_config_is_explicit_and_bounded():
     assert fingerprint(config)==fingerprint(config)
     assert ExperimentConfig(max_observations=9).max_observations==9
     assert ExperimentConfig(max_observations=10).max_observations==10
-    with pytest.raises(ValidationError):ExperimentConfig(max_observations=11)
+    assert ExperimentConfig(max_observations=12).max_observations==12
+    with pytest.raises(ValidationError):ExperimentConfig(max_observations=13)
     with pytest.raises(ValidationError):ExperimentConfig(unknown=True)
 
 

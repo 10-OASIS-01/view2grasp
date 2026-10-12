@@ -160,7 +160,7 @@ def _validate_initial_sources(source_obs, side_obs, side_object, support_z, robo
 
 
 def _resolve_initial_object_reference(obs, decision, side_reference, target_id, support_z,
-                                      robot_depth=None):
+                                      robot_depth=None, *, material_mask=False):
     """Atomic initial semantic selection; no self-anchoring or partial result."""
     report = {'frame_id': obs.frame_id, 'camera_id': obs.camera_id, 'target_id': target_id,
         'scope': 'initial_multiview_object_reference', 'initial_semantic_authority': True,
@@ -190,6 +190,8 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
             or any(g.kind not in ('box', 'polygon', 'mask', 'points') for g in proposals)
             or any(g.points and g.kind in ('box', 'mask') for g in proposals)):
         reject('region_and_seeds_required', 'initial reference needs one region and separate explicit object seeds')
+    if material_mask and regions[0].kind not in ('polygon', 'mask'):
+        reject('initial_material_mask_required', 'explicit initial material needs a polygon or mask, never a detection box')
     h, w = obs.depth.shape
     region = proposal_mask(regions[0], obs)
     semantic = region.copy()
@@ -228,6 +230,35 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
         thresholds={'aabb_margin_m': REFERENCE_MARGIN_M, 'component_step_inclusive_m': COMPONENT_STEP_M,
             'anchor_distance_exclusive_m': ANCHOR_DISTANCE_M, 'minimum_total_side_anchor_pixels': 4},
         proposed_region_pixels=int(semantic.sum()), valid_region_pixels=int(candidate.sum()))
+    if material_mask:
+        # A fresh dense semantic label is a different authority from sparse
+        # component seeds. Never apply this interpretation to an old box/reply
+        # or to later reassociation. No interpolated points or FREE cells arise.
+        yy,xx=np.where(candidate);points=xyz[candidate]
+        outside=np.any((points<lo)|(points>hi),axis=1)
+        if outside.any():
+            failures.append({'failure':'initial_material_outside_fixed_envelope',
+                'rejected_pixel_count':int(outside.sum()),
+                'rejected_pixels_xy':np.column_stack([xx,yy])[outside][:12].tolist()})
+        if failures:
+            first=failures[0]
+            reject(first['failure'],'explicit initial material selection failed',
+                **{k:v for k,v in first.items() if k!='failure'},
+                invalid_seed_count=len(invalid_seeds),abstentions=failures)
+        anchors=int(np.count_nonzero(tree.query(points)[0]<ANCHOR_DISTANCE_M))
+        if anchors<4:
+            reject('insufficient_original_overlap','initial material needs four independent side anchors',
+                anchor_pixels=anchors,side_anchor_pixels=anchors,seed_indices=list(range(len(seed_pixels))))
+        report.update(membership_authority='fresh_initial_vlm_dense_material_region',
+            component_seed_gate_applied=False,selected_region_kind=regions[0].kind,
+            anchor_pixels=anchors,side_anchor_pixels=anchors,object_pixels=len(points),
+            source_timestamp=float(obs.timestamp),abstained_source_pixels=0,
+            semantic_identity_limit='Every selected material pixel is explicitly labeled by the fresh VLM polygon/mask. '
+                'This is semantic authority, not a geometric proof that a nearby object was not mislabeled.')
+        report['thresholds']['component_step_inclusive_m']=None
+        return ObjectOwnership(_readonly(candidate),_readonly(points),_readonly(np.column_stack([xx,yy])),
+            _readonly(obs.depth[candidate]),obs.frame_id,obs.camera_id,_source_digest(obs),
+            _readonly(np.empty((0,2),int)),_readonly(np.empty((0,3))),report)
     labels = np.full((h, w), -1, int)
     components = []
     for index, (xx, yy) in enumerate(seed_pixels):
@@ -290,7 +321,7 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
 
 def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, target_id,
                                      support_z, *, robot_depth=None,
-                                     target_description='', side_part=None) -> ObjectAnnotationResult:
+                                     target_description='', side_part=None, material_mask=False) -> ObjectAnnotationResult:
     """At most two fresh semantic replies on an existing static source image.
 
     Returns ObjectAnnotationResult; only its final attempt can supply ownership.
@@ -306,7 +337,8 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         'target_id': target_id, 'scope': 'initial_multiview_object_reference',
         'maximum_semantic_requests': 2, 'new_observations': 0, 'map_modified': False,
         'contact_permission_changed': False, 'grasp_ray_changed': False,
-        'reply_results_merged': False, 'source_pose_only': True}
+        'reply_results_merged': False, 'source_pose_only': True,
+        'explicit_initial_material_mask': bool(material_mask)}
 
     def finish():
         report.update(semantic_requests=len(attempts), vlm_calls=getattr(vlm, 'calls', 0)-calls_before,
@@ -316,6 +348,8 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         return InitialReferenceResult(tuple(attempts),report,initial_part_points,initial_part_mask)
 
     try:
+        if material_mask and side_part is not None:
+            raise ValueError('dense material initialization is object-only; independent part initialization stays seeded')
         reference = _validate_initial_sources(source_obs, side_obs, side_object, support_z, robot_depth)
         if side_part is not None:
             side_part=_validate_initial_sources(source_obs,side_obs,side_part,support_z,robot_depth)
@@ -339,6 +373,24 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         'image for this fresh annotation. The independent side image establishes a fixed '
         'geometric admission envelope and overall overlap, not labels for new source surfaces.')
     roles=('object',)
+    if material_mask:
+        base_instruction = _instruction(target_id, target_description).replace(
+            'exactly ONE tight whole-object box, polygon or mask',
+            'exactly ONE explicit material polygon or pixel mask (NO box)').replace(
+            'A box can contain background; measured component filters will run.',
+            'Your polygon/mask explicitly labels EVERY depth-valid selected pixel as this object material.')
+        base_instruction += (
+            ' This is a NEW dense-material initialization BEFORE any robot motion, not a detection box '
+            'or a sparse-seed component annotation. Trace the complete visible object material including '
+            'clearly identifiable inner wall and inner bottom. A slanted surface can have many isolated '
+            'depth samples; your explicit material region labels them directly, without filling in depth '
+            'or inferring ownership from neighboring seeds. Use polygon holes for open gaps or independent '
+            'objects; never label the support or robot as object material. Also supply sparse confident '
+            'object-membership seeds inside your material region. The unchanged support, self-depth, '
+            'fixed side-view envelope and independent side-overlap checks all apply. Any invalid seed '
+            'or selected material outside that envelope rejects the complete answer. Uncertain material '
+            'must be omitted. This label grants no contact permission, source retirement or FREE space; '
+            'historical points still require measured pose registration and complete collision coverage.')
     if side_part is not None:
         roles=('object','grasp_part')
         base_instruction=base_instruction.replace('Use ONLY role=object:', 'For the object, use role=object:')
@@ -365,7 +417,8 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         'coordinate_space': 'supplied_crop_normalized_pixel_centers',
         'image_shape_hw': list(crop.observation.depth.shape), 'rejected_samples': []})
     repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope', 'insufficient_original_overlap',
-        'initial_part_outside_owned_object','initial_part_insufficient_material','initial_part_outside_fixed_envelope'}
+        'initial_part_outside_owned_object','initial_part_insufficient_material','initial_part_outside_fixed_envelope',
+        'initial_material_mask_required','initial_material_outside_fixed_envelope'}
     for index in range(2):
         log = {'index': index, 'request_history': copy.deepcopy([transaction]),
             'diagnostic': None if diagnostic is None else diagnostic.provenance()}
@@ -384,7 +437,7 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             geometry_errors=[]
             try:
                 ownership = _resolve_initial_object_reference(source_obs, object_reply, reference,
-                    target_id, support_z, robot_depth)
+                    target_id, support_z, robot_depth, material_mask=material_mask)
             except ObjectOwnershipError as exc:
                 geometry_errors.append(exc)
             log['object_geometry_passed']=ownership is not None

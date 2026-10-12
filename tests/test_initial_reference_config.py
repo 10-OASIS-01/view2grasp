@@ -13,6 +13,19 @@ def test_initial_reference_is_opt_in_and_requires_source_ownership():
     assert not ExperimentConfig().initial_multiview_part
     with pytest.raises(ValidationError,match='requires initial multiview object reference'):
         ExperimentConfig(initial_multiview_part=True)
+    assert not ExperimentConfig().initial_object_material_mask
+    with pytest.raises(ValidationError,match='requires initial multiview object reference'):
+        ExperimentConfig(initial_object_material_mask=True)
+
+
+def test_material_config_changes_only_initial_authority_and_closed_loop_budget():
+    root=Path(__file__).resolve().parents[1]
+    previous=load_config(root/'configs/mug-two-part-views.yaml').model_dump()
+    material=load_config(root/'configs/mug-material-reference.yaml').model_dump()
+    assert previous.pop('max_observations')==10 and material.pop('max_observations')==12
+    assert previous.pop('initial_object_material_mask') is False
+    assert material.pop('initial_object_material_mask') is True
+    assert previous==material
 
 
 def test_multiview_config_keeps_existing_observation_and_search_limits():

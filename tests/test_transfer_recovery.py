@@ -34,6 +34,7 @@ def test_named_config_explicitly_reserves_postlift_without_changing_default_prot
     ('occluded',6,0,(4,6,2,0)),('occluded',8,0,(6,8,2,0)),
     ('occluded',10,2,(6,8,2,2)),('occluded',10,1,(7,9,2,1)),
     ('mug',10,2,(7,10,3,0)),('block',6,0,(4,6,2,0)),
+    ('mug',11,0,(7,11,4,0)),('mug',12,0,(7,12,5,0)),
 ])
 def test_phase_limits_reserve_postlift_before_preclose_recovery(task,maximum,reserve,expected):
     budget = tabletop_observation_budget(task,maximum,reserve)

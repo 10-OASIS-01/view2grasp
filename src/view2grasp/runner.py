@@ -859,7 +859,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     initialization=annotate_initial_object_reference(vlm,source_observation,
                         side_observation,original_object,ownership_identity,map_.table_z,
                         robot_depth=robot_depths.get(source_observation.frame_id),
-                        target_description=decision.target)
+                        target_description=decision.target,material_mask=config.initial_object_material_mask)
                     ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
                     stem=out/f'initial_object_reference_{source_observation.frame_id:03d}'
                     stem.with_suffix('.json').write_text(json.dumps(initialization.report,indent=2))
