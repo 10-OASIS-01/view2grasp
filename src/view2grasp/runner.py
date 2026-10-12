@@ -25,7 +25,7 @@ from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tab
 from .object_annotation import annotate_source_object
 from .initial_object_reference import annotate_initial_object_reference,select_initial_part_view
 from .payload_registration import register_payload_source,PayloadRegistrationError
-from .postclose_preview import LiftEvidence,setup_lift_attachment,preview_lift
+from .postclose_preview import LiftEvidence,setup_lift_attachment,preview_lift,source_pose_recovery
 
 
 _MUG_REFINEMENT_INSTRUCTION=(
@@ -783,7 +783,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             source_ownership=None;source_observation=None;current_ownership=[]
             additional_source_ownership=[]
             current_tracked_evidence=[];current_contact_evidence=[]
-            registered_source=None
+            registered_source=None;last_registration_failure=None;side_observation=None
             ownership_enabled=task=='mug' and config.source_object_ownership and record.attempts==0
             identities={g.target_id for g in decision.groundings if g.role=='object'}
             ownership_identity=next(iter(identities)) if len(identities)==1 else None
@@ -822,7 +822,8 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     registered_source_points=(None if registered_source is None else
                         registered_source.transformed_source_points))
             def register_owned(frame_id):
-                nonlocal ownership_perception_seconds
+                nonlocal ownership_perception_seconds,last_registration_failure
+                last_registration_failure=None
                 if source_ownership is None:return None
                 # target may still contain a pre-close fallback when tracking
                 # failed. Registration must never self-match that historical
@@ -834,6 +835,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         *(owned.object_points for owned,_ in additional_source_ownership)])
                     registration=register_payload_source(original_object,measured,sources)
                 except PayloadRegistrationError as exc:
+                    last_registration_failure=exc.report.get('failure')
                     event('source_payload_registration_rejected',frame_id=frame_id,diagnostics=exc.report)
                     return None
                 finally:
@@ -969,13 +971,14 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # additional frame; solid-object tasks remain capped at two. The independent evaluator still
             # verifies success if the observation budget is fully consumed.
             post_index=0;post_association=False
+            source_recovery_used=False;postclose_views=[]
             post_limit=phase_budget.postclose_limit
             # The opt-in source reconstruction can use an unspent pre-grasp
             # slot for a genuinely missing carried surface. The episode limit
             # and any post-lift reserve remain fixed; no extra images appear.
             max_post_views=(post_limit-record.observations if ownership_enabled else reserve_after_close)
             while record.observations<post_limit and post_index<max_post_views:
-                strict_preview=None
+                strict_preview=None;source_request=None
                 if ownership_enabled and post_index:
                     preview_timer=time.monotonic()
                     try:
@@ -987,7 +990,12 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     # No acquired image is spent on invented free-space need.
                     # OCC, IK failure and incomplete previews still proceed to
                     # the unchanged full final lift planner, never execution.
-                    if not strict_preview.report['mapping_evidence_available']:break
+                    if not strict_preview.report['mapping_evidence_available']:
+                        if config.initial_multiview_reference and registered_source is None:
+                            source_request=source_pose_recovery(strict_preview.report,last_registration_failure,
+                                side_observation,obs,postclose_views,post_limit-record.observations,source_recovery_used)
+                        if source_request is None:break
+                        source_recovery_used=True
                 coverage_payload=np.vstack([target,measured_owned_points(),measured_contact_points()])
                 if source_ownership is not None and (strict_preview is None or registered_source is not None):
                     # The first view retains the original visibility hypothesis.
@@ -1079,9 +1087,18 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         'historical_owned_points':0 if source_ownership is None else len(source_ownership.object_points),
                         'registered_hypothesis':registered_source is not None,
                         'scope':'View prediction only; no map, contact or FREE changes.'}
-                history.append({'coverage_advice':payload_advice,
+                transaction={'coverage_advice':payload_advice,
                     'scene_changed_since_observation':post_index==0,'feedback':
-                    'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'})
+                    'The gripper has closed with observed contact. Choose one mapping view for the carried-object lift sweep; do not ground again.'}
+                if source_request is not None:
+                    payload_advice={'purpose':'source_pose_verification',
+                        'views':[source_request['reference_view']],'max_observations_to_acquire':1,
+                        'reference_kind':'actual_preclose_grasp_image_viewpoint',
+                        'scope':'Measured pose verification only; no UNKNOWN-path or motion certificate.'}
+                    transaction={'coverage_advice':payload_advice,'source_pose_verification':source_request,
+                        'feedback':'Use the one offered source viewpoint to resolve current object registration; keep the robot stationary.'}
+                    event('source_pose_recovery_request',**source_request)
+                history.append(transaction)
                 event('postgrasp_view_advice',**payload_advice)
                 if strategy == 'active':
                     post=vlm.decide(obs,INSTRUCTIONS[task],history,force_observe=True)
@@ -1090,10 +1107,15 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 else:
                     selected=None
                 selected=tabletop_view(strategy,initial_view,rng,selected)
+                if source_request is not None:
+                    if strategy!='active':selected=tuple(source_request['reference_view'])
+                    if different_tabletop_view(selected,source_request['reference_view']):
+                        raise RuntimeError('perception: source pose recovery requires the offered acquired viewpoint')
                 sim.move_camera(*selected)
                 history.append({'view':obs.view,'selected_view':selected,
                     'feedback':'completed one post-grasp mapping observation'})
                 obs=observe(after_close=True)
+                postclose_views.append(obs.view)
                 removed_sets=[]
                 if task=='occluded':
                     association=contact_annotation(obs,decision,original_object,original_part,

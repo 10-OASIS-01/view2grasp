@@ -12,6 +12,33 @@ from scipy.spatial import cKDTree
 
 from .mapping import DepthMap
 from .planning import Planner, PlanningBudgetExceeded
+from .transfer_recovery import different_tabletop_view
+
+
+def source_pose_recovery(preview, failure, reference, current, acquired_views, remaining, used):
+    """One budgeted source-view revisit for unresolved measured registration.
+
+    This is correspondence evidence acquisition, not invented UNKNOWN coverage.
+    The reference is an actually acquired grasp-side view, not a scene pose.
+    """
+    if (used or type(remaining) is not int or remaining <= 0 or reference is None
+            or failure not in ('insufficient_bounded_overlap', 'ambiguous_local_pose')
+            or preview.get('mapping_evidence_available') is not False
+            or preview.get('occupied_unresolved') is not True):
+        return None
+    view = np.asarray(reference.view, dtype=float)
+    if (view.shape != (3,) or not np.isfinite(view).all()
+            or not different_tabletop_view(view, current.view)
+            or any(not different_tabletop_view(view, prior) for prior in acquired_views)):
+        return None
+    return {'purpose':'source_pose_verification','frame_id':current.frame_id,'camera_id':current.camera_id,
+        'reference_frame_id':reference.frame_id,'reference_camera_id':reference.camera_id,
+        'reference_view':view.tolist(),'registration_failure':failure,
+        'registration_verified':False,'remaining_real_observations':remaining,
+        'maximum_recovery_observations':1,'acquires_new_observation':True,
+        'scope':'Revisit an acquired source viewpoint at the current stationary robot state. '
+            'Fresh measured object semantics and unchanged rigid registration must pass before any source retirement. '
+            'No grasp ray, contact permission, collision or FREE exemption is granted.'}
 
 
 @dataclass(frozen=True)

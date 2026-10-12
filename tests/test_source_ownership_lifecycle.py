@@ -19,7 +19,9 @@ def _contains(haystack, needles):
 def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                   registration_ok=True, tracked_current=False, enabled=True, task='mug',
                   complete_lift=False, max_observations=4, initialize_reference=False,
-                  initialization_ok=True, initial_identity=True, initialize_part=False, part_initialization_ok=True):
+                  initialization_ok=True, initial_identity=True, initialize_part=False, part_initialization_ok=True,
+                  pose_recovery=False,recovery_registration_ok=False,recovery_failure='ambiguous_local_pose',
+                  pose_recovery_at=0):
     from view2grasp import recording, runner
     sample, xyz, mask, original = scene()
     part_mask = np.zeros_like(mask); part_mask[6:10, 2:4] = True
@@ -40,7 +42,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     evidence = SimpleNamespace(events=[], annotations=[], registrations=[], retired=[],
         advice=[], targets=[], source_certificates=[], observations=[], executed=[],
         track_calls=[], removals=[], initializations=[],
-        operation_order=[], original=original, source_points=source_points,
+        operation_order=[],camera_requests=[], original=original, source_points=source_points,
         current_points=current_points, predicted=predicted, neighbor=neighbor,
         candidate=candidate, original_ray=candidate.approach.copy())
     evidence.extra_initial_part=source_points[-4:].copy()
@@ -55,7 +57,8 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             template = current_sample if self.phase == 'close' else sample
             return replace(template, frame_id=self.frame, q=self.q.copy(),
                 gripper_q=self.gripper_q.copy(),
-                timestamp=1. if initialize_reference and self.phase=='observe' else float(self.frame))
+                timestamp=1. if initialize_reference and self.phase=='observe' else float(self.frame),
+                view=(30.*self.frame,15.,.8) if pose_recovery else template.view)
         def move_camera(self, *args): pass
         def validate_initial_proxies(self, *args): pass
         def step(self, q, grip):
@@ -142,6 +145,11 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             self.calls = 0; self.seconds = 0.; self.client = SimpleNamespace(close=lambda: None)
         def decide(self, obs, *args, **kwargs):
             self.calls += 1
+            request=args[-1][-1].get('source_pose_verification') if args and args[-1] and isinstance(args[-1][-1],dict) else None
+            if request is not None:
+                evidence.camera_requests.append(request.copy())
+                az,el,dist=request['reference_view']
+                return AgentDecision(action='observe',frame_id=obs.frame_id,azimuth=az,elevation=el,distance=dist)
             if kwargs.get('force_observe') or (initialize_reference and obs.frame_id==1) or (initialize_part and obs.frame_id==2):
                 return AgentDecision(action='observe', frame_id=obs.frame_id)
             decision = annotation(obs, mask)
@@ -177,8 +185,11 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         evidence.registrations.append(measured.copy())
         # No acquired current surface means no registration, even if the old
         # pre-close target is geometrically identical to the original reference.
-        if not len(measured) or not registration_ok:
-            raise PayloadRegistrationError('deliberate rejection', {'accepted': False, 'failure': 'no_current_evidence' if not len(measured) else 'test'})
+        ok=(registration_ok and not (pose_recovery and len(evidence.registrations)==1)) or (
+            pose_recovery and recovery_registration_ok and len(evidence.registrations)>=2)
+        if not len(measured) or not ok:
+            raise PayloadRegistrationError('deliberate rejection', {'accepted': False,
+                'failure':'no_current_evidence' if not len(measured) else recovery_failure if pose_recovery else 'test'})
         return SimpleNamespace(transformed_source_points=np.vstack([predicted,predicted]) if initialize_part else predicted.copy(), report={'accepted': True})
 
     def initialize(vlm, source, side, reference, identity, support, **kwargs):
@@ -207,6 +218,10 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
         # original synthetic coverage schedule. Real strict geometry, map
         # isolation and restoration are tested in test_postclose_preview.
         from view2grasp.postclose_preview import LiftPreview
+        if pose_recovery and len(evidence.map.views)>=pose_recovery_at:
+            return LiftPreview(np.empty((0,3)),np.empty((0,3)),
+                {'mapping_evidence_available':False,'occupied_unresolved':payload.registered_source_points is None,
+                    'incomplete':payload.registered_source_points is None},evidence.map.surface.copy())
         carried = [payload.target, payload.contact_points]
         carried.extend(owned.object_points for owned, _ in payload.current_ownership)
         if payload.registered_source_points is not None:

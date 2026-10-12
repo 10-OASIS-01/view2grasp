@@ -1,0 +1,113 @@
+"""An unused real view may resolve source pose; never waive observed obstacles."""
+from dataclasses import replace
+import copy
+import json
+import numpy as np
+import pytest
+from test_geometry import observation
+from test_source_ownership_lifecycle import run_lifecycle,_contains
+from test_vlm import isolated_api_settings,retry_sleeps
+from test_vlm_object_annotation import client_with_responses
+from view2grasp.postclose_preview import source_pose_recovery
+from view2grasp.types import AgentDecision
+
+
+def inputs():
+    ref=replace(observation(),frame_id=2,view=(-165.,15.,.8))
+    current=replace(ref,frame_id=9,view=(-90.,10.,1.3))
+    preview={'mapping_evidence_available':False,'occupied_unresolved':True}
+    return dict(preview=preview,failure='ambiguous_local_pose',reference=ref,current=current,
+        acquired_views=[(60.,10.,1.3),current.view],remaining=1,used=False)
+
+
+def test_one_explicit_source_revisit_uses_only_real_reference_and_existing_budget():
+    data=inputs();request=source_pose_recovery(**data)
+    assert request['reference_view']==list(data['reference'].view)
+    assert request['reference_frame_id']==2 and request['frame_id']==9
+    assert request['maximum_recovery_observations']==1 and request['remaining_real_observations']==1
+    assert request['registration_verified'] is False and request['acquires_new_observation'] is True
+
+
+@pytest.mark.parametrize('fault',['used','budget','boolean_budget','missing','unknown','clear',
+    'unrelated_failure','same_current','already_acquired','nonfinite'])
+def test_no_revisit_without_unresolved_pose_and_a_distinct_budgeted_source_view(fault):
+    data=inputs()
+    if fault=='used':data['used']=True
+    elif fault=='budget':data['remaining']=0
+    elif fault=='boolean_budget':data['remaining']=True
+    elif fault=='missing':data['reference']=None
+    elif fault=='unknown':data['preview']['mapping_evidence_available']=True
+    elif fault=='clear':data['preview']['occupied_unresolved']=False
+    elif fault=='unrelated_failure':data['failure']='invalid_input'
+    elif fault=='same_current':data['current']=replace(data['current'],view=(195.,15.,.8))
+    elif fault=='already_acquired':data['acquired_views'].append((195.,15.,.8))
+    else:data['reference']=replace(data['reference'],view=(np.nan,15.,.8))
+    assert source_pose_recovery(**data) is None
+
+
+@pytest.mark.parametrize('accepted',[False,True])
+def test_runner_one_current_source_view_never_retires_history_without_registration(tmp_path,monkeypatch,accepted):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,max_observations=5,
+        pose_recovery=True,registration_ok=False,recovery_registration_ok=accepted)
+    assert result['observations']==4 and len(e.camera_requests)==1
+    assert e.camera_requests[0]['reference_frame_id']==2
+    assert e.camera_requests[0]['registration_failure']=='ambiguous_local_pose'
+    assert [f for f,_ in e.annotations]==[3,4]
+    assert [f for f,_ in e.retired]==([1,3,4] if accepted else [3,4])
+    assert (e.planner.registered_payload_local is not None)==accepted
+    assert not e.map.contact_allowed(e.predicted).any()
+    assert _contains(e.map.surface,e.neighbor[None])
+    assert not result['success']
+
+
+def test_runner_does_not_exceed_episode_budget_for_pose_verification(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,max_observations=5,
+        pose_recovery=True,registration_ok=False,pose_recovery_at=5)
+    assert result['observations']==5 and not e.camera_requests
+    assert [f for f,_ in e.retired]==[3,4,5]
+
+
+def test_runner_unrelated_registration_failure_does_not_consume_another_view(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,max_observations=5,
+        pose_recovery=True,registration_ok=False,recovery_failure='invalid_input')
+    assert result['observations']==3 and not e.camera_requests
+
+
+def transaction():
+    data=inputs();request=source_pose_recovery(**data)
+    return data['current'],{'source_pose_verification':request,
+        'coverage_advice':{'purpose':'source_pose_verification','views':[request['reference_view']]}}
+
+
+def test_real_vlm_contract_requires_the_offered_source_view_and_keeps_repair_budget(tmp_path):
+    obs,tx=transaction();before=copy.deepcopy(tx)
+    wrong=AgentDecision(action='observe',frame_id=obs.frame_id,camera_id=obs.camera_id,azimuth=0.,elevation=10.,distance=1.3)
+    right=wrong.model_copy(update={'azimuth':-165.,'elevation':15.,'distance':.8})
+    requests=[];client=client_with_responses(tmp_path,[wrong,right],requests)
+    try:answer=client.decide(obs,'Verify source pose',[tx],force_observe=True)
+    finally:client.client.close()
+    assert answer.azimuth==-165. and client.calls==2
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    assert 'source_pose_verification_context' in context and 'mapping_context' not in context
+    assert 'source-pose verification' in context['response_contract']
+    assert 'exactly the offered reference_view' in requests[1]['messages'][-1]['content']
+    assert tx==before
+
+
+@pytest.mark.parametrize('fault',['stale','later_event','verified','purpose','budget','views','unforced','annotation'])
+def test_source_pose_context_cannot_escape_its_current_forced_transaction(tmp_path,fault):
+    obs,tx=transaction();history=[tx];kwargs={'force_observe':True}
+    if fault=='stale':tx['source_pose_verification']['frame_id']=0
+    elif fault=='later_event':history.append({'feedback':'new transaction'})
+    elif fault=='verified':tx['source_pose_verification']['registration_verified']=True
+    elif fault=='purpose':tx['coverage_advice']['purpose']='mapping_only'
+    elif fault=='budget':tx['source_pose_verification']['remaining_real_observations']=0
+    elif fault=='views':tx['coverage_advice']['views']=[]
+    elif fault=='unforced':kwargs={}
+    else:kwargs['observe_purpose']='annotation'
+    response=AgentDecision(action='observe',frame_id=obs.frame_id,azimuth=0.,elevation=10.,distance=1.3)
+    requests=[];client=client_with_responses(tmp_path,[response],requests)
+    try:client.decide(obs,'Observe',history,**kwargs)
+    finally:client.client.close()
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    assert 'source_pose_verification_context' not in context

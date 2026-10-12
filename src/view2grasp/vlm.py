@@ -144,6 +144,15 @@ advice are hypotheses, not current visibility, grasp success or motion approval.
 An earlier pre-lift camera view may be revisited. Only one reserved observation
 remains; using it leaves none for transfer mapping. Strict verification follows.
 The mapping-only coverage preferences below do not apply to this transaction.
+source_pose_verification_context is a different camera-only transaction before
+lifting, after current measured rigid registration failed. Revisit its ONE
+offered, actually acquired grasp-side viewpoint at the current stationary robot
+state. This pre-close viewpoint is not a duplicate of a post-close observation.
+There are no UNKNOWN corridor samples for this request. The fresh image must
+still pass object annotation and the unchanged rigid-registration checks.
+Keep the original grasp ray and robot state; do not propose another grasp or
+claim contact, clearance, attachment or task success. Mapping-only preferences
+for unvisited views do not apply to this explicit source-view revisit.
 Tabletop mapping-only recovery preserves the previously grounded grasp and its
 camera-to-contact approach ray. The recovery camera does NOT select a new grasp
 approach: it should reveal UNKNOWN space along the stored robot/payload path.
@@ -242,6 +251,32 @@ def _held_verification_context(obs,history):
             'An earlier pre-lift view may be revisited if different from the current view. This consumes '
             'the last reserved real observation and leaves no transfer mapping observation. After acquisition, '
             'the same object and part still need explicit semantic, RGB-D and measured-lift verification.'}
+
+
+def _source_pose_verification_context(obs, history):
+    latest=history[-1] if history and isinstance(history[-1],dict) else {}
+    request=latest.get('source_pose_verification');advice=latest.get('coverage_advice')
+    if (not isinstance(request,dict) or not isinstance(advice,dict)
+            or request.get('purpose')!='source_pose_verification'
+            or request.get('frame_id')!=obs.frame_id or request.get('camera_id')!=obs.camera_id
+            or request.get('registration_verified') is not False
+            or request.get('registration_failure') not in ('insufficient_bounded_overlap','ambiguous_local_pose')
+            or type(request.get('remaining_real_observations')) is not int
+            or request['remaining_real_observations']<=0
+            or request.get('maximum_recovery_observations')!=1
+            or advice.get('purpose')!='source_pose_verification'
+            or advice.get('views')!=[request.get('reference_view')]):
+        return None
+    view=request.get('reference_view')
+    if (not isinstance(view,list) or len(view)!=3 or
+            any(type(x) not in (int,float) or not math.isfinite(x) for x in view)):
+        return None
+    return {**copy.deepcopy(request),'current_view':list(obs.view),
+        'instructions':'Return observe with exactly the offered reference_view. It was acquired before closure; '
+            'now acquire ONE new image from that same viewpoint with the robot stationary, to resolve '
+            'the reported current pose-registration failure. Do not re-ground, change the grasp ray or '
+            'choose an UNKNOWN corridor view. Fresh measured object semantics and unchanged registration '
+            'are still required. No source retirement, contact or motion permission is granted.'}
 
 
 def _tabletop_camera_context(obs):
@@ -434,7 +469,12 @@ class VLM:
         if force_observe and obs.base_pose is None:
             if observe_purpose=='mapping_only':
                 held_context=_held_verification_context(obs,history)
-                if held_context is not None:
+                source_context=_source_pose_verification_context(obs,history)
+                if source_context is not None:
+                    user['source_pose_verification_context']=source_context
+                    user['response_contract']+=(' This is source-pose verification: return observe with exactly '
+                        'the offered reference_view to acquire ONE new current image. No new grasp or UNKNOWN corridor request.')
+                elif held_context is not None:
                     user['held_verification_context']=held_context
                     user['response_contract']+=(' This is held-object verification: return observe to choose ONE '
                         'different real view of the same held object and permitted part, not an UNKNOWN corridor '
@@ -560,6 +600,12 @@ class VLM:
                     if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
                         raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
+                if 'source_pose_verification_context' in user and decision.action=='observe':
+                    expected=np.asarray(user['source_pose_verification_context']['reference_view'])
+                    delta=np.asarray([decision.azimuth,decision.elevation,decision.distance])-expected
+                    delta[0]=(delta[0]+180.)%360.-180.
+                    if np.any(np.abs(delta)>1e-6):
+                        raise ValueError('source-pose verification requires exactly the offered reference_view')
                 if annotation_roles is not None and any(g.role!='object' for g in decision.groundings):
                     raise ValueError('this object-only annotation permits only role=object, not grasp_part or grasp_contact')
                 if current_frame_reselection is not None and decision.action=='grasp':
