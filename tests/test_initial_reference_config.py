@@ -56,3 +56,16 @@ def test_second_part_view_is_bounded_and_explicitly_configured():
         with pytest.raises(ValidationError):ExperimentConfig(initial_part_views=value)
     with pytest.raises(ValidationError,match='require explicit part initialization'):
         ExperimentConfig(initial_part_views=2)
+
+
+def test_second_source_pose_view_keeps_total_budget_and_requires_initial_reference():
+    root=Path(__file__).resolve().parents[1]
+    one=load_config(root/'configs/mug-material-reference.yaml').model_dump()
+    two=load_config(root/'configs/mug-ranked-recovery.yaml').model_dump()
+    assert one.pop('source_pose_recovery_views')==1
+    assert two.pop('source_pose_recovery_views')==2
+    assert one==two and two['max_observations']==12
+    for value in (0,3):
+        with pytest.raises(ValidationError):ExperimentConfig(source_pose_recovery_views=value)
+    with pytest.raises(ValidationError,match='require initial multiview reference'):
+        ExperimentConfig(source_pose_recovery_views=2)

@@ -117,6 +117,28 @@ def test_runner_does_not_exceed_episode_budget_for_pose_verification(tmp_path,mo
     assert [f for f,_ in e.retired]==[3,4,5]
 
 
+@pytest.mark.parametrize('budget,start,expected',[(5,4,1),(6,3,2)])
+def test_opt_in_second_revisit_is_distinct_and_never_bypasses_failed_registration(tmp_path,monkeypatch,budget,start,expected):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,max_observations=budget,
+        pose_recovery=True,registration_ok=False,source_pose_views=2,pose_recovery_at=start)
+    assert len(e.camera_requests)==expected
+    assert [r['reference_frame_id'] for r in e.camera_requests]==[2,1][:expected]
+    assert [r['recovery_observations_used'] for r in e.camera_requests]==list(range(expected))
+    assert all(r['maximum_recovery_observations']==2 for r in e.camera_requests)
+    assert result['observations']==start+expected<=budget
+    assert [f for f,_ in e.retired]==list(range(3,start+expected+1))
+    assert e.planner.registered_payload_local is None
+    assert not e.map.contact_allowed(e.predicted).any()
+    assert _contains(e.map.surface,e.neighbor[None]) and not result['success']
+
+
+@pytest.mark.parametrize('used,maximum,allowed',[(0,2,True),(1,2,True),(2,2,False),
+    (1,1,False),(-1,2,False),(0,3,False),(0,True,False)])
+def test_source_recovery_cap_is_explicit_and_bounded(used,maximum,allowed):
+    data=inputs();data['used']=used
+    assert (source_pose_recovery(**data,maximum_views=maximum) is not None)==allowed
+
+
 def test_runner_unrelated_registration_failure_does_not_consume_another_view(tmp_path,monkeypatch):
     result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,max_observations=5,
         pose_recovery=True,registration_ok=False,recovery_failure='invalid_input')
@@ -142,6 +164,15 @@ def test_real_vlm_contract_requires_the_offered_source_view_and_keeps_repair_bud
     assert 'source-pose verification' in context['response_contract']
     assert 'exactly the offered reference_view' in requests[1]['messages'][-1]['content']
     assert tx==before
+
+
+@pytest.mark.parametrize('used,maximum,allowed',[(1,2,True),(2,2,False),(0,3,False),
+    (True,2,False),(-1,2,False)])
+def test_vlm_source_context_enforces_second_revisit_cap(used,maximum,allowed):
+    from view2grasp.vlm import _source_pose_verification_context
+    obs,tx=transaction()
+    tx['source_pose_verification'].update(recovery_observations_used=used,maximum_recovery_observations=maximum)
+    assert (_source_pose_verification_context(obs,[tx]) is not None)==allowed
 
 
 @pytest.mark.parametrize('fault',['stale','later_event','verified','purpose','budget','views','unforced','annotation'])

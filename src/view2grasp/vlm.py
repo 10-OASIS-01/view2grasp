@@ -146,7 +146,7 @@ remains; using it leaves none for transfer mapping. Strict verification follows.
 The mapping-only coverage preferences below do not apply to this transaction.
 source_pose_verification_context is a different camera-only transaction before
 lifting, after current measured rigid registration failed. Revisit its ONE
-offered, actually acquired grasp-side viewpoint at the current stationary robot
+offered, actually acquired source viewpoint at the current stationary robot
 state. This pre-close viewpoint is not a duplicate of a post-close observation.
 There are no UNKNOWN corridor samples for this request. The fresh image must
 still pass object annotation and the unchanged rigid-registration checks.
@@ -263,7 +263,10 @@ def _source_pose_verification_context(obs, history):
             or request.get('registration_failure') not in ('insufficient_bounded_overlap','ambiguous_local_pose')
             or type(request.get('remaining_real_observations')) is not int
             or request['remaining_real_observations']<=0
-            or request.get('maximum_recovery_observations')!=1
+            or type(request.get('maximum_recovery_observations')) is not int
+            or not 1<=request['maximum_recovery_observations']<=2
+            or type(request.get('recovery_observations_used',0)) is not int
+            or not 0<=request.get('recovery_observations_used',0)<request['maximum_recovery_observations']
             or advice.get('purpose')!='source_pose_verification'
             or advice.get('views')!=[request.get('reference_view')]):
         return None

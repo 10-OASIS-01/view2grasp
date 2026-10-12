@@ -21,7 +21,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
                   complete_lift=False, max_observations=4, initialize_reference=False,
                   initialization_ok=True, initial_identity=True, initialize_part=False, part_initialization_ok=True,
                   pose_recovery=False,recovery_registration_ok=False,recovery_failure='ambiguous_local_pose',
-                  pose_recovery_at=0,initialize_part_count=1,fail_part_frame=None):
+                  pose_recovery_at=0,initialize_part_count=1,fail_part_frame=None,source_pose_views=1):
     from view2grasp import recording, runner
     sample, xyz, mask, original = scene()
     part_mask = np.zeros_like(mask); part_mask[6:10, 2:4] = True
@@ -50,6 +50,7 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     class Sim:
         def __init__(self, *args):
             self.q = np.zeros(7); self.gripper_q = np.array([.02, -.02]); self.phase = 'observe'
+            self.requested_view=None
             self.robot_xml = ''; self.joint_names = []; self.eef_name = ''; self.frame = 0
             evidence.sim = self
         def observe(self):
@@ -58,8 +59,9 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
             return replace(template, frame_id=self.frame, q=self.q.copy(),
                 gripper_q=self.gripper_q.copy(),
                 timestamp=1. if initialize_reference and self.phase=='observe' else float(self.frame),
-                view=(30.*self.frame,15.,.8) if pose_recovery else template.view)
-        def move_camera(self, *args): pass
+                view=(self.requested_view if self.phase!='observe' and self.requested_view is not None
+                    else (30.*self.frame,15.,.8)) if pose_recovery else template.view)
+        def move_camera(self, *args): self.requested_view=tuple(args)
         def validate_initial_proxies(self, *args): pass
         def step(self, q, grip):
             self.q = np.asarray(q).copy(); evidence.executed.append(self.phase)
@@ -271,7 +273,8 @@ def run_lifecycle(tmp_path, monkeypatch, *, source_ok=True, current_ok=True,
     result = runner.run_episode(task, 3, 'active', tmp_path, replay=tmp_path/'offline',
         config=runner.ExperimentConfig(max_observations=max_observations, source_object_ownership=enabled,
             initial_multiview_reference=initialize_reference,initial_multiview_part=initialize_part,
-            initial_part_views=initialize_part_count if initialize_part else 1))
+            initial_part_views=initialize_part_count if initialize_part else 1,
+            source_pose_recovery_views=source_pose_views))
     expected_failure = ('execution: evaluator success criterion not met' if complete_lift
         else 'planning: lift deliberate lifecycle stop')
     if initialize_reference and not initialization_ok:

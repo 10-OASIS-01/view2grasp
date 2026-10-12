@@ -65,13 +65,15 @@ def rank_source_pose_views(robot, references, current, points, acquired_views):
 
 
 def source_pose_recovery(preview, failure, reference, current, acquired_views, remaining, used,
-                         *, robot=None, source_candidates=(), source_points=None):
-    """One budgeted source-view revisit for unresolved measured registration.
+                         *, robot=None, source_candidates=(), source_points=None, maximum_views=1):
+    """A bounded source-view revisit for unresolved measured registration.
 
     This is correspondence evidence acquisition, not invented UNKNOWN coverage.
     The reference is an actually acquired grasp-side view, not a scene pose.
     """
-    if (used or type(remaining) is not int or remaining <= 0 or reference is None
+    if (type(maximum_views) is not int or not 1<=maximum_views<=2
+            or type(used) not in (bool,int) or not 0<=int(used)<maximum_views
+            or type(remaining) is not int or remaining <= 0 or reference is None
             or failure not in ('insufficient_bounded_overlap', 'ambiguous_local_pose')
             or preview.get('mapping_evidence_available') is not False
             or preview.get('occupied_unresolved') is not True):
@@ -91,7 +93,8 @@ def source_pose_recovery(preview, failure, reference, current, acquired_views, r
         'reference_view':view.tolist(),'registration_failure':failure,
         'view_ranking':ranking,
         'registration_verified':False,'remaining_real_observations':remaining,
-        'maximum_recovery_observations':1,'acquires_new_observation':True,
+        'maximum_recovery_observations':maximum_views,'recovery_observations_used':int(used),
+        'acquires_new_observation':True,
         'scope':'Revisit an acquired source viewpoint at the current stationary robot state. '
             'Fresh measured object semantics and unchanged rigid registration must pass before any source retirement. '
             'No grasp ray, contact permission, collision or FREE exemption is granted.'}

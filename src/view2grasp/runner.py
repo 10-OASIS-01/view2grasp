@@ -981,7 +981,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
             # additional frame; solid-object tasks remain capped at two. The independent evaluator still
             # verifies success if the observation budget is fully consumed.
             post_index=0;post_association=False
-            source_recovery_used=False;postclose_views=[]
+            source_recovery_used=0;postclose_views=[]
             post_limit=phase_budget.postclose_limit
             # The opt-in source reconstruction can use an unspent pre-grasp
             # slot for a genuinely missing carried surface. The episode limit
@@ -1008,10 +1008,10 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                                     side_observation,obs,postclose_views,post_limit-record.observations,source_recovery_used,
                                     robot=robot,source_candidates=(source_observation,
                                         *(source for _,source in additional_source_ownership)),
-                                    source_points=ownership_reference)
+                                    source_points=ownership_reference,maximum_views=config.source_pose_recovery_views)
                             finally:record.planning_seconds+=time.monotonic()-selection_timer
                         if source_request is None:break
-                        source_recovery_used=True
+                        source_recovery_used+=1
                 coverage_payload=np.vstack([target,measured_owned_points(),measured_contact_points()])
                 if source_ownership is not None and (strict_preview is None or registered_source is not None):
                     # The first view retains the original visibility hypothesis.
