@@ -76,6 +76,22 @@ def select_initial_part_view(observations, side_obs, side_part, support_z, robot
         'new_observations':0,'maximum_additional_source_images':1}
 
 
+def _spread_rejected_pixels(mask, maximum=12):
+    """Show spatially distinct actual outliers within the same diagnostic cap.
+
+    Taking the first row-major pixels can hide a second bad boundary entirely.
+    Farthest-point sampling changes feedback only, never the rejected mask.
+    """
+    points=np.argwhere(mask)[:,::-1]
+    if len(points)<=maximum:return points.tolist()
+    selected=[0]
+    distance=np.sum((points-points[0])**2,axis=1)
+    for _ in range(maximum-1):
+        index=int(np.argmax(distance));selected.append(index)
+        distance=np.minimum(distance,np.sum((points-points[index])**2,axis=1))
+    return points[selected].tolist()
+
+
 def _initial_part_selection(obs, decision, target_id, side_part, support_z, robot_depth):
     """Check part geometry independently so the sole correction sees all faults."""
     proposals=[g for g in decision.groundings if g.role=='grasp_part']
@@ -99,8 +115,9 @@ def _initial_part_selection(obs, decision, target_id, side_part, support_z, robo
     lo,hi=side_part.min(0)-REFERENCE_MARGIN_M,side_part.max(0)+REFERENCE_MARGIN_M
     outside=np.any((points<lo)|(points>hi),axis=1)
     if outside.any():
+        rejected=np.zeros_like(selected);rejected[selected]=outside
         reject('initial_part_outside_fixed_envelope','complete part selection leaves the fixed initial side-part envelope',
-            rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=np.argwhere(selected)[outside][:12,::-1].tolist())
+            rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=_spread_rejected_pixels(rejected))
     report={'scope':'fresh_initial_same_part_semantics_before_execution','pixels':len(points),
         'membership_authority':'explicit VLM grasp_part region inside independently seeded object material',
         'fixed_side_part_sha256':_digest(side_part),'fixed_side_part_aabb_m':[lo.tolist(),hi.tolist()],
@@ -116,7 +133,7 @@ def _validate_initial_part_ownership(obs, selected, ownership):
         raise ObjectOwnershipError('part material must belong to the independently seeded initial object',
             {'frame_id':obs.frame_id,'camera_id':obs.camera_id,
              'failure':'initial_part_outside_owned_object','scope':'fresh_initial_part_semantics','partial':False,
-             'rejected_pixel_count':int(outside.sum()),'rejected_pixels_xy':np.argwhere(outside)[:12,::-1].tolist()})
+             'rejected_pixel_count':int(outside.sum()),'rejected_pixels_xy':_spread_rejected_pixels(outside)})
 
 
 def _validate_initial_sources(source_obs, side_obs, side_object, support_z, robot_depth):
@@ -491,7 +508,9 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         instruction = base_instruction + (
             ' This is the ONE correction on the SAME image. Return a fresh complete region and '
             'explicit seeds; replies are never merged. The diagnostic image marks actual rejected '
-            'pixels only, not replacement seeds or desired boundaries. For envelope failures, '
+            'pixels only, not replacement seeds or desired boundaries. Displayed samples are not '
+            'necessarily exhaustive: reinspect every region edge, since an unmarked pixel is not '
+            'a validated pixel. For envelope failures, '
             'rejected_geometry_pixels are measured outliers; component_seed_pixels only attribute '
             'which seeds selected that component, not whether those seeds themselves are outliers. '
             'Use the first unmarked crop for all output coordinates. Omit uncertain material. '

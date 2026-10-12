@@ -9,6 +9,24 @@ from test_initial_object_reference import ScriptedVLM
 from test_object_ownership import scene,neighbor_scene,annotation
 
 
+def test_part_diagnostics_include_a_distant_minority_boundary_without_inventing_pixels():
+    from view2grasp.initial_object_reference import _spread_rejected_pixels
+    rejected=np.zeros((80,80),dtype=bool)
+    rejected[3:8,3:20]=True
+    rejected[50:53,65]=True
+    before=rejected.copy()
+    samples=_spread_rejected_pixels(rejected)
+    assert len(samples)==12 and len(set(map(tuple,samples)))==12
+    assert all(rejected[y,x] for x,y in samples)
+    assert any(x==65 and y>=50 for x,y in samples)
+    assert any(y<8 for x,y in samples)
+    assert np.array_equal(rejected,before)
+    assert samples==_spread_rejected_pixels(rejected)
+    sparse=np.zeros_like(rejected);sparse[1,2]=sparse[50,65]=True
+    assert _spread_rejected_pixels(sparse)==[[2,1],[65,50]]
+    assert _spread_rejected_pixels(np.zeros_like(rejected))==[]
+
+
 def reply(obs,object_mask,part_mask,seeds=((2,6),(9,6))):
     result=annotation(obs,object_mask,seeds=seeds)
     region=annotation(obs,part_mask).groundings[0].model_copy(update={'role':'grasp_part'})
