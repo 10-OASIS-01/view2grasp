@@ -24,6 +24,7 @@ class LiftEvidence:
     source_ownership: object = None
     source_observation: object = None
     registered_source_points: np.ndarray | None = None
+    additional_source_ownership: tuple = ()
 
 
 @dataclass
@@ -59,12 +60,16 @@ def setup_lift_attachment(planner, map_, position, rotation, evidence):
     if predicted is not None:
         if evidence.source_ownership is None or evidence.source_observation is None:
             raise ValueError('registered payload requires its actual source ownership and observation')
+        sources=((evidence.source_ownership,evidence.source_observation),*evidence.additional_source_ownership)
+        if evidence.additional_source_ownership and len(predicted)!=sum(len(owned.object_points) for owned,_ in sources):
+            raise ValueError('registered collision envelope must include every historical source point')
         planner.registered_payload_local = (predicted - p) @ R
-        actual_source = np.vstack([actual_source, evidence.source_ownership.object_points])
-        removed = map_.retire_owned_source(evidence.source_ownership, evidence.source_observation)
-        retirements.append({'kind': 'source_object_retired',
-            'frame_id': evidence.source_observation.frame_id, 'exact_endpoints': removed,
-            'registered_collision_points': len(predicted)})
+        actual_source = np.vstack([actual_source,*(owned.object_points for owned,_ in sources)])
+        for owned,source in sources:
+            removed = map_.retire_owned_source(owned,source)
+            retirements.append({'kind': 'source_object_retired',
+                'frame_id':source.frame_id,'exact_endpoints':removed,
+                'registered_collision_points':len(predicted)})
     for owned, source in evidence.current_ownership:
         removed = map_.retire_owned_source(owned, source)
         retirements.append({'kind': 'current_object_retired',

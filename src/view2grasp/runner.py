@@ -23,7 +23,7 @@ from .annotation_diagnostic import build_annotation_diagnostic
 from .placement import tabletop_placement
 from .transfer_recovery import different_tabletop_view,plan_transfer_attempt,tabletop_observation_budget
 from .object_annotation import annotate_source_object
-from .initial_object_reference import annotate_initial_object_reference
+from .initial_object_reference import annotate_initial_object_reference,select_initial_part_view
 from .payload_registration import register_payload_source,PayloadRegistrationError
 from .postclose_preview import LiftEvidence,setup_lift_attachment,preview_lift
 
@@ -781,6 +781,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                     obs=observe(); continue
             grasp,transit,approach=chosen
             source_ownership=None;source_observation=None;current_ownership=[]
+            additional_source_ownership=[]
             current_tracked_evidence=[];current_contact_evidence=[]
             registered_source=None
             ownership_enabled=task=='mug' and config.source_object_ownership and record.attempts==0
@@ -817,6 +818,7 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 return LiftEvidence(target,target_part,semantic_contact_only,
                     current_ownership=tuple(current_ownership),contact_points=measured_contact_points(),
                     source_ownership=source_ownership,source_observation=source_observation,
+                    additional_source_ownership=tuple(additional_source_ownership),
                     registered_source_points=(None if registered_source is None else
                         registered_source.transformed_source_points))
             def register_owned(frame_id):
@@ -828,7 +830,9 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                 measured=np.vstack([*current_tracked_evidence,measured_owned_points()])
                 started=time.monotonic()
                 try:
-                    registration=register_payload_source(original_object,measured,source_ownership.object_points)
+                    sources=np.vstack([source_ownership.object_points,
+                        *(owned.object_points for owned,_ in additional_source_ownership)])
+                    registration=register_payload_source(original_object,measured,sources)
                 except PayloadRegistrationError as exc:
                     event('source_payload_registration_rejected',frame_id=frame_id,diagnostics=exc.report)
                     return None
@@ -872,9 +876,45 @@ def run_episode(task="block",seed=0,strategy="active",root="runs",replay=None,co
                         source_pixels_xy=source_ownership.source_pixels_xy,
                         abstained_source_pixels_xy=source_ownership.abstained_source_pixels_xy,
                         side_object=original_object)
+                    if config.initial_multiview_part:
+                        started=time.monotonic()
+                        extra_obs,selection=select_initial_part_view(map_.views,side_observation,original_part,
+                            map_.table_z,robot_depths,excluded_frames=(source_observation.frame_id,),
+                            resolution=map_.resolution)
+                        ownership_perception_seconds+=time.monotonic()-started
+                        (out/'initial_part_view_selection.json').write_text(json.dumps(selection,indent=2))
+                        if extra_obs is not None:
+                            started=time.monotonic();inference_before=vlm.seconds
+                            extra=annotate_initial_object_reference(vlm,extra_obs,side_observation,
+                                original_object,ownership_identity,map_.table_z,
+                                robot_depth=robot_depths.get(extra_obs.frame_id),
+                                target_description=decision.target,side_part=original_part)
+                            ownership_perception_seconds+=max(0.,time.monotonic()-started-(vlm.seconds-inference_before))
+                            stem=out/f'initial_part_reference_{extra_obs.frame_id:03d}'
+                            stem.with_suffix('.json').write_text(json.dumps(extra.report,indent=2))
+                            if extra.ownership is None or extra.initial_part_points is None:
+                                raise RuntimeError('perception: initial multiview part reference unverified')
+                            np.savez_compressed(stem.with_suffix('.npz'),object_points=extra.ownership.object_points,
+                                object_mask=extra.ownership.object_mask,source_pixels_xy=extra.ownership.source_pixels_xy,
+                                part_points=extra.initial_part_points,part_mask=extra.initial_part_mask,
+                                side_object=original_object,side_part=original_part)
+                            additional_source_ownership.append((extra.ownership,extra_obs))
+                            original_part=np.unique(np.vstack([original_part,extra.initial_part_points]),axis=0)
+                            original_part.flags.writeable=False
+                            target_part=np.unique(np.vstack([target_part,extra.initial_part_points]),axis=0)
+                            map_.set_target(target_part)
+                            np.save(out/'initial_permitted_part_reference.npy',original_part)
+                            event('initial_multiview_part_reference',frame_id=extra_obs.frame_id,
+                                side_frame_id=side_observation.frame_id,accepted=True,
+                                object_points=len(extra.ownership.object_points),part_points=len(extra.initial_part_points),
+                                semantic_requests=extra.report['semantic_requests'],vlm_calls=extra.report['vlm_calls'],
+                                phase='before_execution',ray_changed=False,object_only_points_grant_contact=False)
                 else:
                     source_ownership=annotate_owned(source_observation,original_object,'preclose')
             ownership_reference=np.vstack([original_object,source_ownership.object_points]) if source_ownership is not None else original_object.copy()
+            if additional_source_ownership:
+                ownership_reference=np.vstack([ownership_reference,
+                    *(owned.object_points for owned,_ in additional_source_ownership)])
             if ownership_enabled and config.initial_multiview_reference:
                 ownership_reference.flags.writeable=False
                 np.save(out/'initial_ownership_reference.npy',ownership_reference)

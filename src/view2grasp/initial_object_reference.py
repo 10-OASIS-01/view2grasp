@@ -8,6 +8,7 @@ Callers must freeze initialization before execution; this module never revises
 retained evidence from an earlier ownership transaction.
 """
 import copy
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.spatial import cKDTree
@@ -20,6 +21,93 @@ from .object_annotation import (ObjectAnnotationAttempt, ObjectAnnotationResult,
 from .object_ownership import (ANCHOR_DISTANCE_M, COMPONENT_STEP_M, REFERENCE_MARGIN_M,
     SOURCE_EQUALITY_M, ObjectOwnership, ObjectOwnershipError, _digest, _readonly, _source_digest)
 from .observation_crop import _validate_source, crop_observation
+
+
+@dataclass(frozen=True)
+class InitialReferenceResult(ObjectAnnotationResult):
+    initial_part_points: np.ndarray | None = None
+    initial_part_mask: np.ndarray | None = None
+
+
+def select_initial_part_view(observations, side_obs, side_part, support_z, robot_depths,
+                             *, excluded_frames=(), resolution=.005):
+    """Rank existing static images for fresh semantic review, never membership.
+
+    Nearby measured material absent from the original part is a hypothesis to
+    inspect. It may be another object; only the subsequent VLM transaction can
+    label it. No unseen scene image, new camera or post-execution frame enters.
+    """
+    reference=np.asarray(side_part)
+    if (reference.ndim!=2 or reference.shape[1:]!=(3,) or len(reference)<4
+            or not np.isfinite(reference).all() or not np.isfinite(support_z)
+            or not np.isfinite(resolution) or resolution<=0):
+        raise ValueError('part view selection requires a finite measured reference and positive resolution')
+    tree=cKDTree(reference)
+    lo,hi=reference.min(0)-REFERENCE_MARGIN_M,reference.max(0)+REFERENCE_MARGIN_M
+    ranked=[];sources={}
+    for obs in observations:
+        if obs.frame_id in excluded_frames or (obs.frame_id,obs.camera_id)==(side_obs.frame_id,side_obs.camera_id):
+            continue
+        own=robot_depths.get(obs.frame_id)
+        if own is None:continue
+        try:
+            _validate_initial_sources(obs,side_obs,reference,support_z,own)
+            crop=crop_observation(obs,reference,robot_depth=own)
+        except (ValueError,RuntimeError):continue
+        current=crop.observation;y,x=np.mgrid[:current.depth.shape[0],:current.depth.shape[1]]
+        xyz=unproject(np.stack([x,y],-1),current.depth,current.K,current.T_wc)
+        valid=(np.isfinite(xyz).all(2)&(current.depth>.05)&(current.depth<10)
+            &(xyz[:,:,2]>support_z+.006)&np.isfinite(crop.robot_depth)
+            &(current.depth<crop.robot_depth-.003)&np.all((xyz>=lo)&(xyz<=hi),axis=2))
+        points=xyz[valid]
+        novel=points[tree.query(points)[0]>=ANCHOR_DISTANCE_M] if len(points) else points
+        voxels=len(np.unique(np.round(novel/resolution).astype(np.int64),axis=0))
+        ranked.append({'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+            'measured_candidate_pixels':len(points),'novel_candidate_voxels':voxels})
+        sources[obs.frame_id]=obs
+    ranked.sort(key=lambda r:(-r['novel_candidate_voxels'],r['frame_id']))
+    chosen=sources[ranked[0]['frame_id']] if ranked and ranked[0]['novel_candidate_voxels'] else None
+    return chosen,{'scope':'observed geometry ranks a semantic review only; no part or object identity granted',
+        'selected_frame':None if chosen is None else chosen.frame_id,'ranked_frames':ranked,
+        'new_observations':0,'maximum_additional_source_images':1}
+
+
+def _resolve_initial_part(obs, decision, ownership, side_part, support_z, robot_depth):
+    """Fresh, explicit same-part initialization; never inherit whole-object contact."""
+    proposals=[g for g in decision.groundings if g.role=='grasp_part']
+    def reject(failure,message,**details):
+        raise ObjectOwnershipError(message,{'frame_id':obs.frame_id,'camera_id':obs.camera_id,
+            'failure':failure,'scope':'fresh_initial_part_semantics','partial':False,**details})
+    if (len(proposals)!=1 or proposals[0].kind not in ('box','polygon','mask')
+            or any(g.source!='vlm' or g.target_id!=ownership.report['target_id']
+                or g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id for g in proposals)):
+        reject('initial_part_region_required','provide one explicit same-target grasp_part region')
+    proposal=proposals[0];mask=proposal_mask(proposal,obs)
+    for x,y in pixels(proposal.negative_points,obs.depth.shape).reshape(-1,2):
+        mask[max(0,y-2):y+3,max(0,x-2):x+3]=False
+    y,x=np.mgrid[:obs.depth.shape[0],:obs.depth.shape[1]]
+    xyz=unproject(np.stack([x,y],-1),obs.depth,obs.K,obs.T_wc)
+    valid=(np.isfinite(xyz).all(2)&(obs.depth>.05)&(obs.depth<10)&(xyz[:,:,2]>support_z+.006))
+    if robot_depth is not None:valid&=np.isfinite(robot_depth)&(obs.depth<robot_depth-.003)
+    selected=mask&valid
+    outside=selected&~ownership.object_mask
+    if outside.any():
+        reject('initial_part_outside_owned_object','part material must belong to the independently seeded initial object',
+            rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=np.argwhere(outside)[:12,::-1].tolist())
+    points=xyz[selected]
+    if len(points)<4:reject('initial_part_insufficient_material','part region contains fewer than four measured material pixels')
+    lo,hi=side_part.min(0)-REFERENCE_MARGIN_M,side_part.max(0)+REFERENCE_MARGIN_M
+    outside=np.any((points<lo)|(points>hi),axis=1)
+    if outside.any():
+        reject('initial_part_outside_fixed_envelope','complete part selection leaves the fixed initial side-part envelope',
+            rejected_pixel_count=int(outside.sum()),rejected_pixels_xy=np.argwhere(selected)[outside][:12,::-1].tolist())
+    report={'scope':'fresh_initial_same_part_semantics_before_execution','pixels':len(points),
+        'membership_authority':'explicit VLM grasp_part region inside independently seeded object material',
+        'fixed_side_part_sha256':_digest(side_part),'fixed_side_part_aabb_m':[lo.tolist(),hi.tolist()],
+        'part_side_anchor_pixels':int(np.count_nonzero(cKDTree(side_part).query(points)[0]<ANCHOR_DISTANCE_M)),
+        'part_component_anchor_gate_applied':False,'ray_changed':False,
+        'semantic_identity_limit':'The initial same-part label is a VLM assumption, not geometric proof of hidden part identity.'}
+    return _readonly(points),_readonly(selected),report
 
 
 def _validate_initial_sources(source_obs, side_obs, side_object, support_z, robot_depth):
@@ -188,7 +276,7 @@ def _resolve_initial_object_reference(obs, decision, side_reference, target_id, 
 
 def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, target_id,
                                      support_z, *, robot_depth=None,
-                                     target_description='') -> ObjectAnnotationResult:
+                                     target_description='', side_part=None) -> ObjectAnnotationResult:
     """At most two fresh semantic replies on an existing static source image.
 
     Returns ObjectAnnotationResult; only its final attempt can supply ownership.
@@ -198,6 +286,7 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
     """
     calls_before, seconds_before = getattr(vlm, 'calls', 0), getattr(vlm, 'seconds', 0.)
     attempts = []
+    initial_part_points=initial_part_mask=None
     report = {'frame_id': source_obs.frame_id, 'camera_id': source_obs.camera_id,
         'side_frame_id': side_obs.frame_id, 'side_camera_id': side_obs.camera_id,
         'target_id': target_id, 'scope': 'initial_multiview_object_reference',
@@ -210,10 +299,14 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             inference_seconds=getattr(vlm, 'seconds', 0.)-seconds_before,
             last_reply_has_ownership=bool(attempts and attempts[-1].ownership is not None),
             attempts=[copy.deepcopy(attempt.log) for attempt in attempts])
-        return ObjectAnnotationResult(tuple(attempts), report)
+        return InitialReferenceResult(tuple(attempts),report,initial_part_points,initial_part_mask)
 
     try:
         reference = _validate_initial_sources(source_obs, side_obs, side_object, support_z, robot_depth)
+        if side_part is not None:
+            side_part=_validate_initial_sources(source_obs,side_obs,side_part,support_z,robot_depth)
+            if np.any(cKDTree(reference).query(side_part)[0]>SOURCE_EQUALITY_M):
+                raise ValueError('initial side part must be a subset of the measured initial side object')
         crop = crop_observation(source_obs, reference, robot_depth=robot_depth)
     except (ValueError, RuntimeError) as exc:
         report.update(failure='invalid_initial_evidence', error=str(exc))
@@ -231,30 +324,51 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
         'unowned component is being automatically reclassified; the supplied crop is the only '
         'image for this fresh annotation. The independent side image establishes a fixed '
         'geometric admission envelope and overall overlap, not labels for new source surfaces.')
+    roles=('object',)
+    if side_part is not None:
+        roles=('object','grasp_part')
+        base_instruction=base_instruction.replace('Use ONLY role=object:', 'For the object, use role=object:')
+        base_instruction=base_instruction.replace(
+            'No permitted part is requested: do not provide grasp_part, grasp_contact, a replacement grasp point, or a grasp action.',
+            'Also provide exactly ONE separate grasp_part box, polygon or mask on the clearly visible straight outer vertical handle bar around its midpoint, excluding both junctions and cup body. This confirms the SAME requested part from a complementary STATIC image before execution. Explicitly seed object material containing this part. Do not provide grasp_contact, a replacement contact point, or a grasp action.')
+        base_instruction=base_instruction.replace(
+            'No contact, map retirement or free-space permission is granted by this annotation request.',
+            'Only the independently validated grasp_part material may extend the initial part reference; whole-object labels never do. This request grants no map retirement or free-space permission.')
+        report['initial_part_reference']=True
     transaction = {'initial_object_reference': {'frame_id': source_obs.frame_id,
         'camera_id': source_obs.camera_id, 'target_id': target_id, 'attempt': 0,
         'maximum_semantic_requests': 2, 'image_context': copy.deepcopy(crop.provenance())}}
     instruction, diagnostic = base_instruction, None
-    repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope', 'insufficient_original_overlap'}
+    repairable = {'invalid_explicit_seed', 'component_outside_fixed_envelope', 'insufficient_original_overlap',
+        'initial_part_outside_owned_object','initial_part_insufficient_material','initial_part_outside_fixed_envelope'}
     for index in range(2):
         log = {'index': index, 'request_history': copy.deepcopy([transaction]),
             'diagnostic': None if diagnostic is None else diagnostic.provenance()}
         ownership = source_reply = rejection = None
         try:
             raw = vlm.decide(crop.observation, instruction, copy.deepcopy([transaction]),
-                force_observe=True, observe_purpose='annotation', annotation_roles=('object',),
+                force_observe=True, observe_purpose='annotation', annotation_roles=roles,
                 derived_image_context=copy.deepcopy(crop.provenance()), annotation_diagnostic=diagnostic)
             log['raw_annotation'] = raw.model_dump(mode='json')
             source_reply = crop.restore_decision(raw)
             log['source_annotation'] = source_reply.model_dump(mode='json')
-            ownership = _resolve_initial_object_reference(source_obs, source_reply, reference,
+            if any(g.role not in roles for g in source_reply.groundings):
+                raise ValueError('unexpected role in initial reference')
+            object_reply=source_reply.model_copy(update={'groundings':[g for g in source_reply.groundings if g.role=='object']})
+            ownership = _resolve_initial_object_reference(source_obs, object_reply, reference,
                 target_id, support_z, robot_depth)
+            if side_part is not None:
+                initial_part_points,initial_part_mask,part_report=_resolve_initial_part(
+                    source_obs,source_reply,ownership,side_part,support_z,robot_depth)
+                log['initial_part']=part_report
             log['ownership'] = copy.deepcopy(ownership.report)
         except ObjectOwnershipError as exc:
+            ownership=None;initial_part_points=initial_part_mask=None
             log.update(error=str(exc), diagnostics=copy.deepcopy(exc.diagnostics))
             if exc.diagnostics['failure'] in repairable:
                 rejection = exc.diagnostics
         except Exception as exc:
+            ownership=None;initial_part_points=initial_part_mask=None
             log['error'] = f'{type(exc).__name__}: {exc}'
         attempts.append(ObjectAnnotationAttempt(index, ownership, log))
         if index == 1 or rejection is None or source_reply is None:

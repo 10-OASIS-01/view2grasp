@@ -162,6 +162,24 @@ def test_snapshot_copies_mutable_geometry_certificates_and_masks_but_shares_acqu
     assert np.max(map_.home_volumes[0][0]) == 1.
 
 
+def test_multisource_registration_missing_one_cloud_stops_before_map_retirement():
+    obs, _, mask, reference = scene()
+    owned = resolve(obs, annotation(obs, mask), reference)
+    planner, _ = planner_and_evidence()
+    planner.map.surface = owned.object_points.copy()
+    planner.map.tree = cKDTree(planner.map.surface)
+    evidence = LiftEvidence(owned.object_points[:1], owned.object_points[:1], True,
+        source_ownership=owned, source_observation=obs,
+        registered_source_points=owned.object_points + [0., 0., .02],
+        additional_source_ownership=((owned, obs),))
+    before = planner.map.surface.copy()
+    with pytest.raises(ValueError, match='every historical source point'):
+        setup_lift_attachment(planner, planner.map, np.zeros(3), np.eye(3), evidence)
+    assert np.array_equal(planner.map.surface, before)
+    assert planner.map.payload_points is None
+    assert planner.registered_payload_local is None
+
+
 def test_payload_unknown_and_occupied_are_separate_with_no_live_mutation_or_contact_growth():
     planner, evidence = planner_and_evidence([[0., 0., .8], [.1, 0., .8]])
     planner.map.surface = np.array([[0., 0., .81]])

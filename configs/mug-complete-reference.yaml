@@ -1,0 +1,9 @@
+# Explicit initial object and same-handle-part evidence from existing views.
+image_size: 1024
+max_observations: 10
+planning_seconds: 120
+refine_grasp_grounding: true
+source_object_ownership: true
+initial_multiview_reference: true
+initial_multiview_part: true
+diversify_grasp_attempts: true

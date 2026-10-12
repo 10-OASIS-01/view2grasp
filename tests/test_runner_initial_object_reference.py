@@ -44,3 +44,32 @@ def test_default_keeps_old_source_annotation_transaction(tmp_path,monkeypatch):
     _,e=run_lifecycle(tmp_path,monkeypatch)
     assert not e.initializations
     assert [frame for frame,_ in e.annotations]==[1,2,3,4]
+
+
+def test_complementary_initial_part_keeps_ray_and_side_registration_but_tracks_each_source(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,max_observations=6)
+    assert len(e.initializations)==2 and result['attempts']==1
+    assert [(a,b) for a,b,_ in e.initializations]==[(1,3),(2,3)]
+    assert [f for f,_ in e.retired]==[1,2,4,5,6]
+    part=np.load(tmp_path/'mug_active_0003/initial_permitted_part_reference.npy')
+    assert np.array_equal(part,np.unique(np.vstack([e.original,e.extra_initial_part]),axis=0))
+    assert all(np.array_equal(points,e.original) for _,_,points in e.initializations)
+    assert np.array_equal(e.candidate.approach,e.original_ray)
+    assert not e.map.contact_allowed(e.predicted).any()
+    assert _contains(e.source_certificates[-1],e.source_points)
+    assert len(e.planner.registered_payload_local)==2*len(e.predicted)
+
+
+def test_part_failure_stops_before_any_action_and_does_not_use_primary_success_as_fallback(tmp_path,monkeypatch):
+    result,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,
+        part_initialization_ok=False,max_observations=6)
+    assert result['attempts']==0 and len(e.initializations)==2
+    assert not e.executed and not e.annotations and not e.registrations and not e.retired
+
+
+def test_extra_initial_source_has_no_retirement_or_certificate_without_current_fit(tmp_path,monkeypatch):
+    _,e=run_lifecycle(tmp_path,monkeypatch,initialize_reference=True,initialize_part=True,
+        registration_ok=False,max_observations=6)
+    assert [f for f,_ in e.retired]==[4,5,6]
+    assert e.planner.registered_payload_local is None
+    assert not _contains(e.source_certificates[-1],e.source_points)

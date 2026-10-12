@@ -26,6 +26,7 @@ class ExperimentConfig(BaseModel):
     # Opt-in mug initialization: establish explicit object material from the
     # acquired overview and side view before freezing reassociation references.
     initial_multiview_reference: bool = False
+    initial_multiview_part: bool = False
     # Mug development: share the existing search budget across candidate poses
     # before repeating redundant-IK seeds for any one pose.
     diversify_grasp_attempts: bool = False
@@ -53,6 +54,8 @@ class ExperimentConfig(BaseModel):
     def validate_initial_reference(self):
         if self.initial_multiview_reference and not self.source_object_ownership:
             raise ValueError('initial multiview reference requires source object ownership')
+        if self.initial_multiview_part and not self.initial_multiview_reference:
+            raise ValueError('initial multiview part requires initial multiview object reference')
         return self
 
 
