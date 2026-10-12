@@ -380,6 +380,7 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
                     target_id, support_z, robot_depth)
             except ObjectOwnershipError as exc:
                 geometry_errors.append(exc)
+            log['object_geometry_passed']=ownership is not None
             if side_part is not None:
                 try:
                     part_points,part_mask,part_report=_initial_part_selection(
@@ -415,6 +416,9 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             break
         try:
             feedback = _correction_feedback(crop, rejection, source_reply)
+            if log.get('object_geometry_passed') and rejection['failure']=='initial_part_outside_fixed_envelope':
+                feedback['object_geometry_passed_in_rejected_reply']=True
+                feedback['transaction_accepted']=False
             diagnostic = build_annotation_diagnostic(crop.observation, feedback)
         except (ValueError, RuntimeError) as exc:
             log['correction_unavailable'] = str(exc)
@@ -431,4 +435,10 @@ def annotate_initial_object_reference(vlm, source_obs, side_obs, side_object, ta
             'rejected_geometry_pixels are measured outliers; component_seed_pixels only attribute '
             'which seeds selected that component, not whether those seeds themselves are outliers. '
             'Use the first unmarked crop for all output coordinates. Omit uncertain material.')
+        if feedback.get('object_geometry_passed_in_rejected_reply'):
+            instruction+=(' Your previous object region and object seeds passed their own geometric checks; '
+                'the transaction failed on the part region. If those object proposals still match visible '
+                'material, preserve them in your fresh complete answer while fixing the part. Do not add '
+                'unrelated speculative object seeds during a part-only correction. Nothing is automatically '
+                'accepted or copied: all proposals in the new answer will be independently revalidated.')
     return finish()

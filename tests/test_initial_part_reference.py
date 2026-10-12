@@ -178,3 +178,19 @@ def test_confirmed_part_reduces_novelty_without_expanding_fixed_admission_envelo
     assert second['ranked_frames'][0]['novel_candidate_voxels']==0
     with pytest.raises(ValueError,match='finite confirmed material'):
         select_initial_part_view([candidate],side,reference,.9,depths,known_part_points=np.array([[np.nan]*3]*4))
+
+
+def test_part_only_envelope_correction_reports_valid_object_without_reusing_its_authority():
+    obs,xyz,mask,reference=scene(end=50)
+    whole=xyz[mask];bad_part=np.zeros_like(mask);bad_part[6:10,44:48]=True
+    good_part=np.zeros_like(mask);good_part[6:10,2:4]=True
+    first=reply(obs,mask,bad_part,seeds=((2,6),))
+    second=reply(obs,mask,good_part,seeds=((2,6),(1,6)))
+    result,client=initialize(obs,whole,reference,[first,second])
+    feedback=client.requests[1][2][0]['initial_object_reference']['geometry_diagnostics']
+    assert feedback['object_geometry_passed_in_rejected_reply'] is True
+    assert feedback['transaction_accepted'] is False
+    assert 'part-only correction' in client.requests[1][1]
+    assert result.ownership is None and result.initial_part_points is None
+    assert result.attempts[-1].log['diagnostics']['failure']=='invalid_explicit_seed'
+    assert not result.report['reply_results_merged']
