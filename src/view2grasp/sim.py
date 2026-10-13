@@ -21,9 +21,21 @@ INSTRUCTIONS = {
             "Use one active broadside observation, then ground by observation 2 if solid handle material is visible. "
             "From the initial overhead image, estimate the handle's radial direction and choose a view about 90 degrees "
             "to either side of it so the aperture is broadside, preferring the solution on the world -X / azimuth ±180 side "
-            "where the Panda base can reach. Use elevation about -10 to 30 degrees. Represent the open aperture as a polygon "
-            "hole and put any contact point on the outer vertical handle bar."),
-    "occluded": "Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles.",
+            "where the Panda base can reach. State the image-based radial estimate and the derived broadside angle in your "
+            "reason; looking directly along the handle's radial direction is not broadside. Use elevation about -10 to 30 degrees. "
+            "If the robot blocks that broadside, first consider a nearby off-axis view on the same base-side half-plane "
+            "that can still expose the aperture, rather than jumping directly to the opposite side of the table. "
+            "Represent the mug and open aperture with an object proposal (a polygon hole may exclude the aperture). "
+            "The grasp_part must isolate the straight outer vertical handle bar, excluding the cup body and both junctions. "
+            "For this thin handle, prefer a tight grasp_part REGION around the vertical midpoint of the straight bar. "
+            "Omit optional grasp_contact and point fields so calibrated depth can select an interior material point "
+            "inside that region; do not reuse coordinates from earlier images. Leave clearance "
+            "above and below for the complete fingers and hand, not only the fingertip contact."),
+    "occluded": ("Pick up the blue block and place it at the center of the yellow destination. Avoid the red obstacles. "
+                 "Any solid face of the blue block may contact the fingers. In object and grasp_part annotations, "
+                 "include all clearly visible blue-block faces, including sides; do not restrict grasp_part to its top face. "
+                 "The object and grasp_part regions may be identical for this solid block, but must exclude the table, "
+                 "robot and other objects. Annotate only visible material."),
 }
 
 

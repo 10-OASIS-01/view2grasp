@@ -142,7 +142,8 @@ class EpisodeRecord:
     strategy: str
     online: bool = True
     success: bool = False
-    first_grasp_success: bool = False
+    # None means no grasp was measured (for example navigation or setup failure).
+    first_grasp_success: bool | None = None
     observations: int = 0
     attempts: int = 0
     vlm_calls: int = 0

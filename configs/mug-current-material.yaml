@@ -1,0 +1,13 @@
+# Twelve actual observations; fresh explicit current material masks.
+image_size: 1024
+max_observations: 12
+planning_seconds: 120
+refine_grasp_grounding: true
+source_object_ownership: true
+initial_multiview_reference: true
+initial_object_material_mask: true
+current_object_material_mask: true
+initial_multiview_part: true
+initial_part_views: 2
+source_pose_recovery_views: 2
+diversify_grasp_attempts: true

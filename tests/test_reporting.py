@@ -13,7 +13,9 @@ def test_config_is_explicit_and_bounded():
     assert len(config.test_seeds)==20 and min(config.test_seeds)>=100
     assert fingerprint(config)==fingerprint(config)
     assert ExperimentConfig(max_observations=9).max_observations==9
-    with pytest.raises(ValidationError):ExperimentConfig(max_observations=10)
+    assert ExperimentConfig(max_observations=10).max_observations==10
+    assert ExperimentConfig(max_observations=12).max_observations==12
+    with pytest.raises(ValidationError):ExperimentConfig(max_observations=13)
     with pytest.raises(ValidationError):ExperimentConfig(unknown=True)
 
 
@@ -57,3 +59,25 @@ def test_missing_metrics_remain_null_instead_of_fake_zero(tmp_path):
     assert result.exit_code==0,result.output
     row=next(r for r in json.loads((tmp_path/'summary.json').read_text())['groups'] if r['task']=='NavigateKitchen' and r['strategy']=='active')
     assert row['official_success_rate'] is None and row['mean_path_length_m'] is None
+
+
+def test_unmeasured_grasps_do_not_count_as_failed_attempts(tmp_path):
+    from dataclasses import asdict
+    from view2grasp.types import EpisodeRecord
+
+    records=[EpisodeRecord('DeliverCanToBowl',seed,'active') for seed in (3,4,5)]
+    assert records[0].first_grasp_success is None
+    records[1].first_grasp_success=True
+    records[1].attempts=1
+    records[2].first_grasp_success=False
+    records[2].attempts=1
+    for record in records:
+        episode=tmp_path/f'{record.task}_{record.strategy}_{record.seed:04d}'
+        episode.mkdir()
+        (episode/'result.json').write_text(json.dumps(asdict(record)))
+    result=CliRunner().invoke(app,['summarize','--root',str(tmp_path)])
+    assert result.exit_code==0,result.output
+    row=next(r for r in json.loads((tmp_path/'summary.json').read_text())['groups']
+             if r['task']=='DeliverCanToBowl' and r['strategy']=='active')
+    assert row['n']==3
+    assert row['first_grasp_success_rate']==.5

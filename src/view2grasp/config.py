@@ -1,7 +1,7 @@
 """Explicit, serializable experiment settings and reproducibility fingerprints."""
 import hashlib
 from pathlib import Path
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing import Literal
 import yaml
 
@@ -9,9 +9,31 @@ import yaml
 class ExperimentConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     # Six remains the frozen default. Targeted perception development may use
-    # up to three extra closed-loop views for handled / holed geometry; this
-    # raises evidence, never weakens UNKNOWN.
-    max_observations: int = Field(default=6, ge=2, le=9)
+    # up to six extra closed-loop views for handled / holed geometry. The
+    # explicitly named development config records this larger evidence budget;
+    # comparisons must use the same budget and UNKNOWN remains unchanged.
+    max_observations: int = Field(default=6, ge=2, le=12)
+    # Opt-in occluded pick/place reserve: held-object verification followed by
+    # at most one observation of an actually rejected transfer UNKNOWN region.
+    # Zero preserves the previous tabletop observation allocation.
+    post_lift_observations: int = Field(default=0, ge=0, le=2)
+    # Mug-only same-frame crop refinement experiment. Disabled preserves the
+    # original VLM call sequence and replay protocol.
+    refine_grasp_grounding: bool = False
+    # Mug development: independently annotate acquired object surfaces and
+    # register historical ownership before using it as a carried envelope.
+    source_object_ownership: bool = False
+    # Opt-in mug initialization: establish explicit object material from the
+    # acquired overview and side view before freezing reassociation references.
+    initial_multiview_reference: bool = False
+    initial_object_material_mask: bool = False
+    current_object_material_mask: bool = False
+    initial_multiview_part: bool = False
+    initial_part_views: int = Field(default=1,ge=1,le=2)
+    source_pose_recovery_views: int = Field(default=1,ge=1,le=2)
+    # Mug development: share the existing search budget across candidate poses
+    # before repeating redundant-IK seeds for any one pose.
+    diversify_grasp_attempts: bool = False
     max_attempts: int = Field(default=2, ge=1, le=2)
     image_size: int = Field(default=512, ge=128, le=1024)
     voxel_resolution_m: float = Field(default=.005, ge=.002, le=.01)
@@ -25,6 +47,28 @@ class ExperimentConfig(BaseModel):
     mobile_observations: int = Field(default=60,ge=1,le=60)
     navigation_sim_seconds: float = Field(default=180,gt=0,le=180)
     mobile_sim_seconds: float = Field(default=360,gt=0,le=360)
+
+    @model_validator(mode='after')
+    def validate_post_lift_reserve(self):
+        if self.max_observations - self.post_lift_observations < 2:
+            raise ValueError('post-lift reserve requires an initial and a post-close observation')
+        return self
+
+    @model_validator(mode='after')
+    def validate_initial_reference(self):
+        if self.initial_multiview_reference and not self.source_object_ownership:
+            raise ValueError('initial multiview reference requires source object ownership')
+        if self.initial_multiview_part and not self.initial_multiview_reference:
+            raise ValueError('initial multiview part requires initial multiview object reference')
+        if self.initial_object_material_mask and not self.initial_multiview_reference:
+            raise ValueError('explicit initial material requires initial multiview object reference')
+        if self.current_object_material_mask and not self.initial_multiview_reference:
+            raise ValueError('explicit current material requires initial multiview object reference')
+        if self.initial_part_views!=1 and not self.initial_multiview_part:
+            raise ValueError('additional initial part views require explicit part initialization')
+        if self.source_pose_recovery_views!=1 and not self.initial_multiview_reference:
+            raise ValueError('additional source pose views require initial multiview reference')
+        return self
 
 
 def load_config(path=None):

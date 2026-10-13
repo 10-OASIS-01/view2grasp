@@ -8,9 +8,11 @@ import hashlib
 import math
 from pathlib import Path
 import httpx
+import numpy as np
 from PIL import Image
 from .types import AgentDecision, Observation
 from .vlm_settings import VLMSettings
+from .geometry import project
 
 LEGACY_SYSTEM = '''You control a Franka Panda in a tabletop simulator using only images.
 Return one JSON object (no markdown). Actions: observe, grasp, abort.
@@ -77,6 +79,9 @@ SYSTEM = '''You operate a robot using calibrated RGB-D observations, task langua
 proprioception, and planning feedback. Return ONE JSON object without markdown.
 Actions: observe, navigate, grasp, place, finish, abort. Always include action,
 frame_id, camera_id, and a short operational reason. Use only the current image.
+Top-level frame_id and camera_id ALWAYS identify the CURRENT INPUT image,
+including for observe actions. Every grounding uses those same input IDs.
+NEVER put a requested future camera in top-level camera_id or in a grounding.
 groundings is a list of associated visual proposals. Each proposal includes:
 kind (points, box, polygon, path), role, frame_id, camera_id, target_id, source="vlm".
 roles: object, grasp_part, grasp_contact, place_region, navigation_goal,
@@ -92,8 +97,17 @@ All proposals referring to one object and its parts MUST share the same target_i
 e.g. object=mug and grasp_part=mug_handle both use target_id="mug".
 Grasp: ground object and grasp_part (box/polygon/points); optionally give
 grasp_contact points on SOLID material, never a hole, background or robot.
-The planner derives contacts from regions when no point is supplied. For a
-handle expose both the material and aperture; use negative points/holes to
+The planner derives contacts from regions when no point is supplied. For a small
+solid object whose graspable face spans only a few pixels, prefer explicit object
+and grasp_part regions and OMIT optional grasp_contact / point coordinates: a
+coarsely rounded click can move the approach toward the face edge. Give a point
+only when a particular visible contact location is needed and can be located
+precisely. Explicit points remain binding and are never silently recentered. For a
+whole object with visible surfaces separated by occlusion or depth gaps, add
+kind="points", role="object" membership seeds on those visible surfaces inside
+its object region. These are NOT grasp_contact points: they identify object
+material for collision geometry and do not permit finger contact there.
+For a handle expose both the material and aperture; use negative points/holes to
 exclude background. Grasp approach stays within 15 degrees of the camera ray
 to the resolved contact. Choose a view giving reachable approach and clearance.
 Place: ground a support region large enough for the object and free of clutter.
@@ -101,18 +115,192 @@ Navigate: ground navigation_goal on visible FLOOR and look_at on the destination
 optionally propose a ground_path. Paths are planning hints, NOT certified free
 space. An end_effector_path has no implied depth from the image background.
 For tabletop observe, specify azimuth [-180,180], elevation [-15,85], distance
-[.55,1.3]. Orbit center [-.12,0,.95]; azimuth 0 is world +X, 90 is +Y. The Panda
+[.55,1.3] as three explicit JSON fields, not only in the reason text.
+Orbit center [-.12,0,.95]; azimuth 0 is world +X, 90 is +Y. The Panda
 base is on -X. Low broadside views expose mug-handle apertures; overhead views
 often suit blocks. Coverage advice uses only observed geometry and robot model.
+tabletop_camera_context projects known world axes into THIS image. Each delta
+is the normalized image displacement for a +0.1 m world-axis step at the stated
+workspace reference. Use these local directions to infer world-XY azimuth;
+image-left is NOT automatically world -X. They are calibration hints, not an
+object position or observed free space. Side views may collapse horizontal axes.
 For mounted cameras, observe selects observation_camera from available_cameras and optional
 observation_motion: none, turn_left, turn_right, wrist. Motion requires planning;
-do not request a virtual camera teleport. Groundings always refer to the camera
-of the supplied image, even when observe requests a different camera separately.
+do not request a virtual camera teleport. ONLY observation_camera identifies the
+requested NEXT camera; top-level camera_id and all grounding camera_id values
+still identify the camera of the supplied image. For every mounted-camera
+response OMIT azimuth, elevation, and distance entirely. They are tabletop-only
+fields: do not send null or numeric placeholders for them.
 If must_ground_now is true, grasp or abort. If must_observe_now is true, observe.
 Unknown-space rejection means acquire relevant additional observations. Respect
 remaining budgets. finish reports a visual hypothesis, not evaluator success.
+held_verification_context is a separate camera-only transaction after lifting.
+Its priority is to clearly see the SAME held object and permitted part in ONE
+different real view, so their explicit annotations can be checked. It supplies
+NO UNKNOWN path evidence: do not prefer corridor coverage over recognizing the
+held material. Keep the robot, fixed attachment reference and original grasp
+ray unchanged; never propose a new grasp. The attachment projection and view
+advice are hypotheses, not current visibility, grasp success or motion approval.
+An earlier pre-lift camera view may be revisited. Only one reserved observation
+remains; using it leaves none for transfer mapping. Strict verification follows.
+The mapping-only coverage preferences below do not apply to this transaction.
+source_pose_verification_context is a different camera-only transaction before
+lifting, after current measured rigid registration failed. Revisit its ONE
+offered, actually acquired source viewpoint at the current stationary robot
+state. This pre-close viewpoint is not a duplicate of a post-close observation.
+There are no UNKNOWN corridor samples for this request. The fresh image must
+still pass object annotation and the unchanged rigid-registration checks.
+Keep the original grasp ray and robot state; do not propose another grasp or
+claim contact, clearance, attachment or task success. Mapping-only preferences
+for unvisited views do not apply to this explicit source-view revisit.
+Tabletop mapping-only recovery preserves the previously grounded grasp and its
+camera-to-contact approach ray. The recovery camera does NOT select a new grasp
+approach: it should reveal UNKNOWN space along the stored robot/payload path.
+Prefer an unvisited view from the latest coverage_advice, even when that view is
+poor for recognizing or grasping the target. Avoid repeating the current view
+when the scene has not moved: another identical image adds no coverage. Explain
+which advised view you choose or why a different unvisited view is needed.
+mapping_context exposes the latest advice and which advised views have not
+been acquired in that recovery transaction. Prefer its remaining views over
+remembering the list from older history. These are predicted viewpoints, not
+observed free space; every motion still needs geometric validation.
+approach_reselection_context instead reports a bounded geometry or kinematics
+search limitation for the previous grasp direction, not global infeasibility.
+Choose a different semantic observation of the requested graspable part;
+after it is acquired, ground again to select a NEW approach ray. It is not a
+mapping-only transaction and old grasp coordinates do not apply to the new image.
+Both approach_reselection_context and current_frame_reselection_context permit
+revisiting an earlier view: the mapping-only preference for unvisited coverage
+does not apply. Use supplied robot-only kinematic view advice to prioritize
+directions; it does not prove target visibility, free space, or a safe path.
+annotation_context requests regions in the supplied current image only. It does
+not acquire another observation or execute a camera command. If this image is a
+calibrated crop, ALL coordinates refer to that crop's image_size; never reuse old
+full-frame coordinates. The crop location is only a projection hypothesis from
+previous measurements, not proof that the target is visible there. Mark only
+visible requested material and omit regions when you cannot identify it.
+grounding_refinement_context instead requests a fresh grasp or abort in a crop
+of this already acquired frame, BEFORE a grasp ray is formed. Use crop-normalized
+coordinates and fresh explicit object and grasp_part regions. It is not an
+observe annotation or mapping-only transaction; no camera motion is requested.
 For legacy tabletop pick/place, place_point:[x,y] on the destination may accompany
 the grasp proposals. Do not invent geometry or refer to unseen candidate images.'''
+
+
+def _response_reference_rules(obs):
+    reference=(f'For this CURRENT INPUT, top-level frame_id must be {obs.frame_id} '
+        f'and top-level camera_id must be {json.dumps(obs.camera_id)}. '
+        'Every grounding must use these exact same frame_id and camera_id values, '
+        'with source="vlm". These source IDs do not change when requesting another view. ')
+    if obs.base_pose is not None:
+        return reference+('This is a mounted-camera observation. ONLY observation_camera names '
+            'the requested NEXT camera, chosen from available_cameras. OMIT azimuth, elevation, '
+            'and distance entirely; do not send null or numeric placeholders. '
+            'observation_motion may be none, turn_left, turn_right, or wrist.')
+    return reference+('For tabletop observe, include explicit numeric azimuth, elevation, '
+        'and distance fields; the reason text alone does not move the camera.')
+
+
+def _mapping_context(obs,history):
+    # A fresh advice transaction can follow a changed robot/payload pose. Do not
+    # remove views merely because the same camera was used before that advice.
+    index=next((i for i in range(len(history)-1,-1,-1)
+                if isinstance(history[i],dict) and 'coverage_advice' in history[i]),None)
+    advice=None if index is None else history[index]['coverage_advice']
+    recent=[] if index is None else history[index+1:]
+    stale_image=index is not None and history[index].get('scene_changed_since_observation',False)
+    views=[] if stale_image else [list(map(float,obs.view))]
+    views.extend(list(map(float,item['view'])) for item in recent
+                 if isinstance(item,dict) and 'view' in item)
+    def key(view):
+        azimuth,elevation,distance=map(float,view)
+        return (round(azimuth%360,3)%360,round(elevation,3),round(distance,4))
+    seen={key(view) for view in views}
+    offered=advice.get('views',[]) if isinstance(advice,dict) else []
+    return {'purpose':'mapping_only','latest_coverage_advice':advice,
+            'scene_changed_since_observation':stale_image,
+            'views_in_current_transaction':views,
+            'unvisited_advised_views':[view for view in offered if key(view) not in seen]}
+
+
+def _held_verification_context(obs,history):
+    # Only the latest explicit transaction can override mapping semantics.
+    # An older held request must not become active again after another event.
+    latest=history[-1] if history and isinstance(history[-1],dict) else {}
+    verification=latest.get('held_verification');advice=latest.get('coverage_advice')
+    if (not isinstance(verification,dict) or not isinstance(advice,dict)
+            or verification.get('frame_id')!=obs.frame_id or verification.get('camera_id')!=obs.camera_id
+            or verification.get('strict_association_verified') is not False
+            or type(verification.get('remaining_real_observations')) is not int
+            or verification['remaining_real_observations']!=1
+            or type(verification.get('remaining_transfer_mapping_observations_after_this_view')) is not int
+            or verification['remaining_transfer_mapping_observations_after_this_view']!=0
+            or advice.get('purpose')!='held_object_verification'):
+        return None
+    current=_mapping_context(obs,history)
+    return {'purpose':'held_object_verification','frame_id':obs.frame_id,'camera_id':obs.camera_id,
+        'current_view':list(obs.view),'remaining_real_observations':1,
+        'remaining_transfer_mapping_observations_after_this_view':0,
+        'latest_coverage_advice':copy.deepcopy(advice),
+        'different_advised_views':current['unvisited_advised_views'],
+        'instructions':'Choose ONE DIFFERENT real camera view that clearly exposes the SAME held object '
+            'and permitted part for strict annotation. This is held-material verification, not UNKNOWN-path '
+            'coverage: no rejected path samples are supplied. Keep the robot, fixed attachment reference '
+            'and original grasp ray unchanged. Do not re-ground or propose a new grasp. The latest advice '
+            'is only a visibility hypothesis; it does not establish that the object is held or approve motion. '
+            'An earlier pre-lift view may be revisited if different from the current view. This consumes '
+            'the last reserved real observation and leaves no transfer mapping observation. After acquisition, '
+            'the same object and part still need explicit semantic, RGB-D and measured-lift verification.'}
+
+
+def _source_pose_verification_context(obs, history):
+    latest=history[-1] if history and isinstance(history[-1],dict) else {}
+    request=latest.get('source_pose_verification');advice=latest.get('coverage_advice')
+    if (not isinstance(request,dict) or not isinstance(advice,dict)
+            or request.get('purpose')!='source_pose_verification'
+            or request.get('frame_id')!=obs.frame_id or request.get('camera_id')!=obs.camera_id
+            or request.get('registration_verified') is not False
+            or request.get('registration_failure') not in ('insufficient_bounded_overlap','ambiguous_local_pose')
+            or type(request.get('remaining_real_observations')) is not int
+            or request['remaining_real_observations']<=0
+            or type(request.get('maximum_recovery_observations')) is not int
+            or not 1<=request['maximum_recovery_observations']<=2
+            or type(request.get('recovery_observations_used',0)) is not int
+            or not 0<=request.get('recovery_observations_used',0)<request['maximum_recovery_observations']
+            or advice.get('purpose')!='source_pose_verification'
+            or advice.get('views')!=[request.get('reference_view')]):
+        return None
+    view=request.get('reference_view')
+    if (not isinstance(view,list) or len(view)!=3 or
+            any(type(x) not in (int,float) or not math.isfinite(x) for x in view)):
+        return None
+    return {**copy.deepcopy(request),'current_view':list(obs.view),
+        'instructions':'Return observe with exactly the offered reference_view. It was acquired before closure; '
+            'now acquire ONE new image from that same viewpoint with the robot stationary, to resolve '
+            'the reported current pose-registration failure. Do not re-ground, change the grasp ray or '
+            'choose an UNKNOWN corridor view. Fresh measured object semantics and unchanged registration '
+            'are still required. No source retirement, contact or motion permission is granted.'}
+
+
+def _tabletop_camera_context(obs):
+    """Project known workspace axes, without inspecting any object or depth."""
+    if obs.base_pose is not None or obs.camera_id!='activeview':return None
+    h,w=obs.rgb.shape[:2]
+    if min(h,w)<2:return None
+    reference=np.array([-.12,0.,.95]);step=.1
+    try:
+        uv,depth=project(np.vstack([reference,reference+step*np.eye(3)]),obs.K,obs.T_wc)
+    except ValueError:return None
+    if np.any(depth<=.01) or not np.isfinite(uv).all():return None
+    scale=np.array([w-1,h-1])
+    delta=(uv[1:]-uv[0])/scale
+    return {'reference_kind':'known camera-orbit workspace center, not a target',
+            'reference_world_m':reference.tolist(),
+            'reference_normalized_uv':np.round(uv[0]/scale,6).tolist(),
+            'axis_step_m':step,
+            'world_axes_normalized_delta':{
+                axis:np.round(vector,6).tolist() for axis,vector in zip(('+X','+Y','+Z'),delta)},
+            'scope':'Local calibration directions only; not object geometry or free-space evidence.'}
 
 
 class VLM:
@@ -123,19 +311,244 @@ class VLM:
         self.calls = 0; self.seconds = 0.; self.replay = replay
         self.client = httpx.Client(timeout=self.settings.timeout_seconds)
 
-    def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False):
+    def decide(self, obs: Observation, instruction, history, force_grasp=False,force_observe=False,
+               observe_purpose='mapping_only',derived_image_context=None,annotation_diagnostic=None,
+               current_frame_reselection=None,grounding_refinement=None,grounding_refinement_feedback=None,
+               annotation_roles=None):
+        if observe_purpose not in ('mapping_only','approach_reselection','annotation'):
+            raise ValueError('unsupported observation purpose')
+        if observe_purpose!='mapping_only' and (not force_observe or force_grasp or obs.base_pose is not None):
+            raise ValueError(observe_purpose.replace('_',' ')+' requires a forced tabletop observation')
+        if annotation_roles is not None and (observe_purpose!='annotation' or
+                not isinstance(annotation_roles,(tuple,list)) or tuple(annotation_roles)!=('object',)):
+            raise ValueError('annotation_roles supports only object-only forced tabletop annotation')
+        if current_frame_reselection is not None and (not isinstance(current_frame_reselection,dict)
+                or force_observe or force_grasp or obs.base_pose is not None or observe_purpose!='mapping_only'):
+            raise ValueError('current-frame reselection requires an unforced tabletop decision and evidence dictionary')
+        if grounding_refinement is not None:
+            if (not isinstance(grounding_refinement,dict) or not force_grasp or force_observe
+                    or obs.base_pose is not None or observe_purpose!='mapping_only'
+                    or current_frame_reselection is not None):
+                raise ValueError('grounding refinement requires an exclusive forced tabletop grasp and crop provenance dictionary')
+            if (not isinstance(derived_image_context,dict) or grounding_refinement!=derived_image_context
+                    or grounding_refinement.get('source_frame_id')!=obs.frame_id
+                    or grounding_refinement.get('source_camera_id')!=obs.camera_id
+                    or grounding_refinement.get('crop_shape_hw')!=list(obs.depth.shape)
+                    or tuple(obs.rgb.shape[:2])!=tuple(obs.depth.shape)
+                    or grounding_refinement.get('new_observation') is not False):
+                raise ValueError('grounding refinement requires matching current source frame, camera, image shape and derived crop provenance')
+        if grounding_refinement_feedback is not None:
+            feedback=grounding_refinement_feedback
+            if (grounding_refinement is None or not isinstance(feedback,dict)
+                    or feedback.get('frame_id')!=obs.frame_id or feedback.get('camera_id')!=obs.camera_id
+                    or feedback.get('coordinate_space')!='supplied_crop_normalized_pixel_centers'
+                    or feedback.get('image_shape_hw')!=list(obs.depth.shape)
+                    or type(feedback.get('repair_attempt')) is not int or feedback['repair_attempt']!=1
+                    or type(feedback.get('max_geometry_repairs')) is not int or feedback['max_geometry_repairs']!=1
+                    or not isinstance(feedback.get('geometry_diagnostics'),dict)):
+                raise ValueError('grounding refinement feedback requires one geometry repair in the current crop coordinate space')
+            previous=AgentDecision.model_validate(feedback.get('previous_crop_decision'))
+            if (previous.action!='grasp' or previous.frame_id!=obs.frame_id or previous.camera_id!=obs.camera_id
+                    or any(g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id or g.source!='vlm'
+                        for g in previous.groundings)):
+                raise ValueError('grounding refinement feedback requires the previous same-frame crop grasp')
+        if derived_image_context is not None and observe_purpose!='annotation' and grounding_refinement is None:
+            raise ValueError('derived images are supported only for current-frame annotation or grounding refinement')
+        if annotation_diagnostic is not None:
+            if observe_purpose!='annotation' and not (
+                    grounding_refinement is not None and grounding_refinement_feedback is not None):
+                raise ValueError('pixel diagnostics require current-frame annotation or an actual grounding refinement correction')
+            annotation_diagnostic.validate_source(obs)
         image = io.BytesIO(); Image.fromarray(obs.rgb).save(image,format="PNG")
         image_sha256=hashlib.sha256(obs.rgb.tobytes()).hexdigest()
+        image_reference=f'../observations/frame_{obs.frame_id:03d}.png'
+        if derived_image_context is not None:
+            image_reference=f'input_frame_{obs.frame_id:03d}_{image_sha256[:16]}.png'
+            (self.directory/image_reference).write_bytes(image.getvalue())
+        diagnostic_metadata=None;diagnostic_reference=None;diagnostic_image=None
+        if annotation_diagnostic is not None:
+            diagnostic_metadata=annotation_diagnostic.provenance()
+            diagnostic_image=io.BytesIO();Image.fromarray(annotation_diagnostic.rgb).save(diagnostic_image,format='PNG')
+            diagnostic_metadata['diagnostic_png_sha256']=hashlib.sha256(diagnostic_image.getvalue()).hexdigest()
+            diagnostic_metadata['primary_png_sha256']=hashlib.sha256(image.getvalue()).hexdigest()
+            diagnostic_reference=f'annotation_diagnostic_{obs.frame_id:03d}_{diagnostic_metadata["diagnostic_rgb_sha256"][:16]}.png'
+            (self.directory/diagnostic_reference).write_bytes(diagnostic_image.getvalue())
         user = {"instruction":instruction,"frame_id":obs.frame_id,"camera_id":obs.camera_id,"view":obs.view,
                 "image_size":{"width":obs.rgb.shape[1],"height":obs.rgb.shape[0]},
                 "history":history,"must_ground_now":force_grasp,"must_observe_now":force_observe}
         user['allowed_actions']=['observe','grasp','abort'] if obs.base_pose is None else ['observe','navigate','grasp','place','finish','abort']
+        user['response_contract']=_response_reference_rules(obs)
+        camera_context=_tabletop_camera_context(obs)
+        if camera_context is not None:user['tabletop_camera_context']=camera_context
+        if derived_image_context is not None:
+            user['derived_image_context']=copy.deepcopy(derived_image_context)
+        if diagnostic_metadata is not None:
+            user['annotation_diagnostic']=diagnostic_metadata
+        if grounding_refinement is not None:
+            user['allowed_actions']=['grasp','abort']
+            user['response_contract']+=(' This is a before-ray grounding refinement. Return grasp with fresh explicit '
+                'object AND grasp_part regions, or abort. Every coordinate is normalized to this supplied image_size. '
+                'Also provide explicit kind=points, role=object membership seeds on visible object material. '
+                'Use derived_image_context for its bounds. Do not return observe or a camera command.')
+            user['grounding_refinement_context']={
+                'purpose':'before_ray_same_frame_grasp_refinement','frame_id':obs.frame_id,
+                'camera_id':obs.camera_id,'acquires_new_observation':False,
+                'derived_image_context':copy.deepcopy(grounding_refinement),
+                'instructions':'This crop contains pixels from the CURRENT already-acquired image. '
+                    'No grasp ray has been accepted from the earlier coarse proposal. Reinspect this crop and return '
+                    'a fresh grasp with explicit object AND grasp_part box, polygon or mask regions, or abort if uncertain. '
+                    'For a mug, prefer ONE tight object BOX around the complete visible mug body AND handle together. '
+                    'The object region must include the chosen handle material, not only the cup body; '
+                    'do not copy the small grasp_part region as the object. A box needs no aperture hole. '
+                    'Alongside that region, provide a SEPARATE kind=points, role=object proposal with the SAME '
+                    'target_id: place membership seeds well inside each clearly visible component of the mug body '
+                    'and handle, including body material separated from the handle by robot occlusion. '
+                    'Polygon vertices are boundaries, not membership seeds. Never seed the aperture, robot, '
+                    'table or an uncertain surface. Object seeds retain measured body geometry for collisions; '
+                    'they do not choose the contact or expand the permitted grasp_part. '
+                    'Use the smallest sufficient set of interior membership points, not a dense set along edges. '
+                    'One clear point per visible disconnected body surface is enough; the separately resolved '
+                    'handle contact also seeds its own object component. Avoid silhouette pixels and table shadows. '
+                    'Use a polygon or mask only when you can trace its complete visible extent reliably; '
+                    'any polygon hole must lie inside its outer boundary and must not remove the chosen handle material. '
+                    'Provide a SEPARATE tight visible grasp_part region inside the object region: '
+                    'the permitted grasp_part must isolate the straight outer vertical handle bar around its midpoint, '
+                    'excluding both junctions. Inspect both ends of the visible straight bar before choosing its middle; '
+                    'do not copy an upper-only patch or earlier pixel coordinates. Prefer regions without an optional contact click. '
+                    'If the requested part or its extent cannot be identified inside this crop, abort. '
+                    'ALL output coordinates use this crop image_size and its normalized pixel centers. The source frame/camera '
+                    'IDs stay unchanged. The caller will restore coordinates to the full acquired image and run ordinary '
+                    'depth, grounding, ray, IK and collision checks. Cropping grants no visibility, contact or safety evidence. '
+                    'Ignore older mapping-only preserve-ray instructions: this is before-ray semantic refinement, '
+                    'not an observe annotation and not a request for another image.'}
+            if grounding_refinement.get('kind')=='full_acquired_observation':
+                user['grounding_refinement_context']['instructions']+=(
+                    ' In this request the supplied image is the COMPLETE current acquired frame, with identity '
+                    'crop bounds. References above to a crop mean this entire supplied image. The earlier coarse '
+                    'region had no depth pixels satisfying necessary contact conditions; it is not a location hint. '
+                    'Locate the requested object and part afresh in the full image, or abort. Coordinates refer '
+                    'directly to this full image_size; no earlier crop coordinates should be reused.')
+            if grounding_refinement_feedback is not None:
+                user['grounding_refinement_feedback']=copy.deepcopy(grounding_refinement_feedback)
+                user['grounding_refinement_context']['instructions']+=(' The previous crop reply failed the actual '
+                    'RGB-D grounding resolver. This is its ONE geometry correction in the SAME supplied crop. '
+                    'The feedback and previous_crop_decision use this crop coordinate space. Reinspect the image and '
+                    'return fresh complete object and separate part regions, or abort. Check that the whole-object '
+                    'region includes the chosen visible handle material. Geometry diagnostics identify rejected pixels '
+                    'or constraints, not correct semantic labels or suggested replacement contact points. '
+                    'Do not mechanically union, expand or clip regions, or move a contact to a diagnostic pixel; '
+                    'correct the visual annotation only when the current image supports it. All ordinary checks still apply.')
+                if diagnostic_metadata is not None:
+                    user['grounding_refinement_context']['instructions']+=(
+                        ' The FIRST image is the unmarked current crop. The SECOND image magnifies exactly '
+                        'the same acquired pixels with a coordinate grid and borders around actually rejected '
+                        'seeds. Both images share the same field of view and normalized pixel-center coordinates. '
+                        'The marked pixels are rejection evidence, not target labels or replacement seeds. '
+                        'Reinspect visible material; use a sparse set of clearly interior object points and the '
+                        'separate grasp_part region, or abort if uncertain. Return normalized FIRST-image '
+                        'coordinates; raw pixel indices refer to the FIRST image_size, never the enlarged grid. '
+                        'This transaction asks only for current-image localization, not a reconstructed earlier '
+                        'overview, a world-direction explanation or another camera view.')
+        if current_frame_reselection is not None:
+            user['current_frame_reselection_context']={
+                'purpose':'fresh_grounding_on_acquired_frame','frame_id':obs.frame_id,
+                'camera_id':obs.camera_id,'acquires_new_observation':False,
+                'evidence':copy.deepcopy(current_frame_reselection),
+                'instructions':'The previous grasp transaction has ended after bounded geometry/IK search failed. '
+                    'This CURRENT image was actually acquired from a different view during mapping. '
+                    'If the requested part and clearance are visible, propose a NEW grasp with fresh explicit object '
+                    'AND grasp_part regions in this image; the planner will derive a NEW camera-to-contact ray. '
+                    'Also provide explicit kind=points, role=object membership seeds inside each clearly visible '
+                    'object component, including the mug body and handle. Use the same target_id and enclose '
+                    'these seeds in the complete visible object region. These membership seeds are not contact '
+                    'points and do not expand the separate permitted grasp_part. Do not seed uncertain pixels. '
+                    'Old preserve-ray/mapping-only instructions and the initial-grounding deadline do not apply '
+                    'to this new transaction. Do not reuse old coordinates, candidate IDs, or target masks. '
+                    'If this image is unsuitable, choose observe or abort. Revisiting an earlier view is allowed; '
+                    'do not reject a view just because it was already acquired for mapping. Prefer supplied '
+                    'robot-only kinematic view advice when selecting an observation, while checking the requested '
+                    'part in the next actual image: advice does not prove visibility, free space or path safety. '
+                    'Observation reserves and all safety checks remain in force.'}
+        if force_observe and obs.base_pose is None:
+            if observe_purpose=='mapping_only':
+                held_context=_held_verification_context(obs,history)
+                source_context=_source_pose_verification_context(obs,history)
+                if source_context is not None:
+                    user['source_pose_verification_context']=source_context
+                    user['response_contract']+=(' This is source-pose verification: return observe with exactly '
+                        'the offered reference_view to acquire ONE new current image. No new grasp or UNKNOWN corridor request.')
+                elif held_context is not None:
+                    user['held_verification_context']=held_context
+                    user['response_contract']+=(' This is held-object verification: return observe to choose ONE '
+                        'different real view of the same held object and permitted part, not an UNKNOWN corridor '
+                        'or a new grasp. Only one reserved observation remains.')
+                else:user['mapping_context']=_mapping_context(obs,history)
+            elif observe_purpose=='approach_reselection':
+                evidence=next((item['approach_reselection'] for item in reversed(history)
+                    if isinstance(item,dict) and isinstance(item.get('approach_reselection'),dict)),None)
+                if evidence is not None and (evidence.get('frame_id')!=obs.frame_id
+                        or evidence.get('camera_id')!=obs.camera_id):
+                    evidence=None
+                user['approach_reselection_context']={
+                    'purpose':'approach_reselection','current_view':list(obs.view),
+                    'reason':None if evidence is None else evidence.get('reason'),
+                    'evidence':copy.deepcopy(evidence),
+                    'instructions':'The previous grasp transaction is ending after bounded geometry or kinematics search. '
+                        'Use the current evidence.reason to distinguish nominal observed obstacles from exhausted IK seeds; '
+                        'neither establishes global infeasibility or absence of every valid pregrasp pose. '
+                        'Select a different semantic view that exposes the same requested graspable part from a reachable direction. '
+                        'This ends the failed grasp transaction: the next acquired image requires fresh grounding and a NEW ray. '
+                        'Do not reuse old image coordinates or treat this as mapping-only recovery. '
+                        'Revisiting an earlier view is allowed; the mapping-only preference for unvisited views does not apply. '
+                        'Prioritize supplied robot-only kinematic view advice, which does not certify target visibility, '
+                        'free space or path safety. '
+                        'This request overrides an earlier initial-grounding deadline; remaining observation and post-close reserves still apply.'}
+            else:
+                user['annotation_context']={
+                    'purpose':'current_frame_annotation','acquires_new_observation':False,
+                    'instructions':'Annotate the requested object and permitted part in this supplied image. '
+                        'Return observe with the CURRENT view fields; no camera command from this reply will execute. '
+                        'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
+                        'All normalized coordinates refer to this image_size, including when it is a crop. '
+                        'A projected crop does not establish visibility or identity. Omit uncertain regions.'}
+                if annotation_roles is not None:
+                    user['annotation_context']['requested_roles']=['object']
+                    user['annotation_context']['instructions']=(
+                        'Annotate ONLY the requested object in this supplied source image. '
+                        'Use only role=object: one tight box, polygon or mask region plus separate '
+                        'kind=points positive object-membership seeds on clearly visible material. '
+                        'No permitted part is requested; do not provide grasp_part or grasp_contact. '
+                        'Return observe with the CURRENT view fields; no camera command from this reply will execute. '
+                        'Ignore earlier coverage-view advice and grounding deadlines for this annotation. '
+                        'All normalized coordinates refer to this image_size, including when it is a crop. '
+                        'This establishes source-image membership only, not current held pose, contact or free space. '
+                        'A projected crop does not establish visibility or identity. Omit uncertain regions or seeds.')
+                    user['response_contract']+=' This annotation permits only object groundings; do not return grasp_part or grasp_contact.'
+                if diagnostic_metadata is not None:
+                    user['annotation_context']['instructions']+=(
+                        ' The FIRST image is the unmarked current image and the only output coordinate system. '
+                        'The SECOND image is a magnified coordinate aid from the same pixels; its grid and magenta pixel borders '
+                        'are geometry diagnostics, not object labels or a suggested mask. Both images have exactly the same '
+                        'field of view and normalized pixel-center coordinates: a location has the same normalized x,y in both. '
+                        'Raw-pixel labels for rejected pixels are listed in annotation_diagnostic metadata. '
+                        'Visually reinspect material and boundaries in the first image. '
+                        'Do not blindly delete marked pixels. Return normalized FIRST-image coordinates x/(width-1), y/(height-1); '
+                        'raw pixel indices always refer to the FIRST image_size, never to the magnified image or grid cells.')
+        primary_url='data:image/png;base64,'+base64.b64encode(image.getvalue()).decode()
+        image_references={primary_url:image_reference}
         messages = [{"role":"system","content":SYSTEM}, {"role":"user","content":[
             {"type":"text","text":json.dumps(user)},
-            {"type":"image_url","image_url":{"url":"data:image/png;base64,"+base64.b64encode(image.getvalue()).decode()}}]}]
+            {"type":"image_url","image_url":{"url":primary_url}}]}]
+        if diagnostic_image is not None:
+            diagnostic_url='data:image/png;base64,'+base64.b64encode(diagnostic_image.getvalue()).decode()
+            messages[-1]['content'].append({'type':'image_url','image_url':{'url':diagnostic_url}})
+            image_references[diagnostic_url]=diagnostic_reference
         last_error = None
         for repair in range(3):
-            payload = {"model":self.settings.model,"messages":messages,**self.settings.request_options()}
+            # A rejected answer and its correction are added to the *next*
+            # request. Keep this call's audit log identical to what was sent.
+            request_messages=copy.deepcopy(messages)
+            payload = {"model":self.settings.model,"messages":request_messages,**self.settings.request_options()}
             index = self.calls; self.calls += 1
             start = time.monotonic()
             response = None
@@ -155,6 +568,10 @@ class VLM:
                             original=Image.open(source_image).convert('RGB').tobytes()
                             if hashlib.sha256(original).hexdigest()!=image_sha256:
                                 raise RuntimeError("legacy response replay image mismatch")
+                    expected_diagnostic=saved['request'].get('annotation_diagnostic_sha256')
+                    actual_diagnostic=None if diagnostic_metadata is None else diagnostic_metadata['diagnostic_rgb_sha256']
+                    if expected_diagnostic!=actual_diagnostic:
+                        raise RuntimeError('response replay annotation diagnostic image mismatch')
                     response = saved["response"]
                 else:
                     r = self.client.post(self.settings.base_url+"/chat/completions",
@@ -182,9 +599,36 @@ class VLM:
                 if decision.frame_id != obs.frame_id: raise ValueError("frame_id is stale")
                 if decision.camera_id != obs.camera_id: raise ValueError("camera_id is stale or incorrect")
                 if decision.action not in user['allowed_actions']:raise ValueError('action is not supported in the current backend')
+                if decision.action=='observe' and obs.base_pose is None:
+                    if not {'azimuth','elevation','distance'}<=decision.model_fields_set:
+                        raise ValueError('tabletop observe requires explicit azimuth, elevation and distance JSON fields; the reason text does not move the camera')
                 if any(g.source!='vlm' for g in decision.groundings):raise ValueError('your proposals must have source=vlm; only actual tool execution can claim sam/rgbd')
-                if force_grasp and decision.action == "observe": raise ValueError("observation budget exhausted: grasp or abort")
-                if force_observe and decision.action != "observe": raise ValueError("post-action map refresh requires an observe action")
+                if 'source_pose_verification_context' in user and decision.action=='observe':
+                    expected=np.asarray(user['source_pose_verification_context']['reference_view'])
+                    delta=np.asarray([decision.azimuth,decision.elevation,decision.distance])-expected
+                    delta[0]=(delta[0]+180.)%360.-180.
+                    if np.any(np.abs(delta)>1e-6):
+                        raise ValueError('source-pose verification requires exactly the offered reference_view')
+                if annotation_roles is not None and any(g.role!='object' for g in decision.groundings):
+                    raise ValueError('this object-only annotation permits only role=object, not grasp_part or grasp_contact')
+                if current_frame_reselection is not None and decision.action=='grasp':
+                    roles={g.role for g in decision.groundings if g.kind!='candidate'}
+                    if not {'object','grasp_part'}<=roles:
+                        raise ValueError('current-frame reselection requires fresh explicit object AND grasp_part groundings; old points or candidate IDs are insufficient')
+                if grounding_refinement is not None and decision.action=='grasp':
+                    roles={g.role for g in decision.groundings if g.kind in ('box','polygon','mask')}
+                    if not {'object','grasp_part'}<=roles:
+                        raise ValueError('grounding refinement requires fresh explicit object AND grasp_part regions; legacy points or candidate IDs are insufficient')
+                if (grounding_refinement is not None or current_frame_reselection is not None) and decision.action=='grasp':
+                    if not any(g.role=='object' and g.kind=='points' and g.points for g in decision.groundings):
+                        raise ValueError('fresh whole-object grounding requires explicit kind=points, role=object membership seeds on visible material inside the object region; polygon vertices and grasp_contact points do not qualify')
+                if force_grasp and decision.action == "observe": raise ValueError("this decision requires grasp or abort; another observation is not allowed at this step")
+                if force_observe and decision.action != "observe":
+                    purpose=observe_purpose.replace('_',' ')
+                    detail='annotate the supplied image' if observe_purpose=='annotation' else 'collect additional geometry'
+                    if 'held_verification_context' in user:
+                        purpose='held object verification';detail='verify the same held object and permitted part'
+                    raise ValueError(f'this {purpose} step requires an observe action to {detail}')
                 last_error=None
                 return decision
             except (ValueError, KeyError, httpx.HTTPError) as exc:
@@ -213,20 +657,23 @@ class VLM:
                     previous = choices[0].get('message') if isinstance(choices,list) and choices and isinstance(choices[0],dict) else None
                     if isinstance(previous,dict) and isinstance(previous.get('content'),str):
                         messages.append({'role':'assistant','content':self.settings.redact(previous['content'])})
-                    messages.append({"role":"user","content":"Correct your JSON response: "+last_error})
+                    messages.append({"role":"user","content":"Correct your JSON response: "+last_error+
+                        '\n'+user['response_contract']})
             finally:
                 elapsed = time.monotonic()-start; self.seconds += elapsed
                 # Credentials are never recorded. Image is stored separately in observations.
-                logged=copy.deepcopy(messages)
+                logged=copy.deepcopy(request_messages)
                 for message in logged:
                     if isinstance(message.get("content"),list):
                         for item in message["content"]:
                             if item.get("type")=="image_url":
-                                item["image_url"]["url"]=f"../observations/frame_{obs.frame_id:03d}.png"
+                                item["image_url"]["url"]=image_references[item['image_url']['url']]
                 request_log = {"model":logged_model,"connection":connection,
                     "transport":"replay" if self.replay else "online",
                     "context":user,"messages":logged,"repair":repair,
                     "image_sha256":image_sha256}
+                if diagnostic_metadata is not None:
+                    request_log['annotation_diagnostic_sha256']=diagnostic_metadata['diagnostic_rgb_sha256']
                 log_text=json.dumps({"request":request_log,
                     "response":response,"seconds":elapsed,"error":last_error},ensure_ascii=False,indent=2)
                 (self.directory/f"call_{index:03d}.json").write_text(self.settings.redact(log_text))

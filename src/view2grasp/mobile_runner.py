@@ -1,17 +1,17 @@
 """Closed-loop mobile task orchestration; all planning uses observation-only modules."""
-from dataclasses import asdict,replace
+from dataclasses import asdict,dataclass,field,replace
 from pathlib import Path
 import json
 import time
 import traceback
 import zipfile
 import numpy as np
-from scipy.spatial import ConvexHull
+from scipy.spatial import cKDTree
 from .types import EpisodeRecord
 from .robocasa_backend import RoboCasaSimulator,CAMERAS
 from .mobile_evaluation import MobileEvaluator,scene_eligibility
 from .config import fingerprint
-from .geometry import cloud,unproject,grasp_candidates,part_cloud
+from .geometry import project,unproject,grasp_candidates,part_cloud
 from .grounding import GroundingResolver,proposal_mask,pixels,lift_ground_path
 from .mapping import DepthMap
 from .planning import RobotModel,Planner,time_parameterize
@@ -19,21 +19,56 @@ from .navigation import NavigationCollision,SE2Planner,velocity_command,wrap_ang
 from .recording import save_observation,save_episode
 from .vlm import VLM
 from .view_advisor import suggest_mounted_cameras
+from .target_framing import TargetFraming
 
 
-def grounded_world(obs,g):
+class NavigationGroundingError(ValueError):
+    """Keep measured rejection evidence without turning it into a new action."""
+    def __init__(self,message,diagnostics):
+        super().__init__(message)
+        self.diagnostics=diagnostics
+
+
+def observed_floor_mask(obs,floor_z):
+    valid=np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)
+    v,u=np.where(valid)
+    world=unproject(np.stack([u,v],axis=-1),obs.depth[v,u],obs.K,obs.T_wc)
+    valid[v,u] &= np.abs(world[:,2]-floor_z)<=.06
+    return valid
+
+
+def grounded_world(obs,g,*,floor_z=None):
+    """Resolve an image grounding; navigation regions use observed floor only."""
     if g.frame_id!=obs.frame_id or g.camera_id!=obs.camera_id:raise ValueError('stale grounding')
+    navigation_floor=floor_z if g.role=='navigation_goal' else None
     if g.kind=='points':xy=g.points[0]
     else:
         mask=proposal_mask(g,obs)
         import cv2
         mask &= np.isfinite(obs.depth)&(obs.depth>.05)&(obs.depth<10)
+        if navigation_floor is not None:
+            # A broad proposed region can contain both floor and a cabinet or
+            # wall. Select its interior after applying the same floor-height
+            # requirement as an explicit point; never move a supplied point.
+            mask &= observed_floor_mask(obs,navigation_floor)
+            if not mask.any():
+                raise NavigationGroundingError('grounding: navigation region has no observed floor',{
+                    'frame_id':obs.frame_id,'camera_id':obs.camera_id,'proposal_kind':g.kind,
+                    'floor_z_m':float(navigation_floor),'floor_tolerance_m':.06,
+                    'floor_pixels_in_region':0})
         d=cv2.distanceTransform(mask.astype(np.uint8),cv2.DIST_L2,3)
         if d.max()==0:raise ValueError('grounding has no valid interior')
         y,x=np.unravel_index(d.argmax(),d.shape);h,w=d.shape;xy=(x/(w-1),y/(h-1))
     uv=pixels([xy],obs.depth.shape)[0];depth=obs.depth[uv[1],uv[0]]
     if not np.isfinite(depth) or not .05<depth<10:raise ValueError('invalid grounding depth')
-    return unproject(uv,depth,obs.K,obs.T_wc)
+    position=unproject(uv,depth,obs.K,obs.T_wc)
+    if navigation_floor is not None and abs(position[2]-navigation_floor)>.06:
+        raise NavigationGroundingError('grounding: navigation goal is not on observed floor',{
+            'frame_id':obs.frame_id,'camera_id':obs.camera_id,'proposal_kind':g.kind,
+            'pixel':uv.tolist(),'normalized_pixel':list(map(float,xy)),
+            'world_xyz_m':position.tolist(),'floor_z_m':float(navigation_floor),
+            'height_above_floor_m':float(position[2]-navigation_floor),'floor_tolerance_m':.06})
+    return position
 
 
 def support_plane(points,anchor=None):
@@ -50,6 +85,60 @@ def support_plane(points,anchor=None):
     return float(np.median(selected[:,2])),selected
 
 
+def navigation_floor(points,robot_boundary):
+    """Fit measured floor near the known standing robot's lowest boundary.
+
+    The robot model supplies a height prior, never unseen floor points. A view
+    containing only a countertop must not make that support surface navigable.
+    """
+    boundary=np.asarray(robot_boundary,dtype=float)
+    if (boundary.ndim!=2 or boundary.shape[1]!=3 or not len(boundary) or
+            not np.isfinite(boundary).all()):
+        raise ValueError('grounding: navigation floor needs a finite known robot boundary')
+    lowest=float(boundary[:,2].min())
+    observed=np.asarray(points)
+    observed=observed[np.isfinite(observed).all(axis=1)&(np.abs(observed[:,2]-lowest)<=.06)]
+    try:return support_plane(observed)
+    except ValueError as exc:
+        raise ValueError('grounding: navigation floor unobserved near robot bottom; observe robot0_nav_floor before moving') from exc
+
+
+def navigation_observation_context(obs,observed_points,robot_depth=None,*,robot_boundary):
+    """Bounded current-image floor evidence; no destination or path oracle."""
+    context={'frame_id':obs.frame_id,'camera_id':obs.camera_id,'floor_samples':[],
+        'evidence_scope':'Measured floor height only; samples do not establish robot clearance, reachability, or destination identity.',
+        'guidance':('Identify the requested destination in an acquired image before choosing a route toward it. '
+            'If a downward floor view does not establish the destination, use observe with an available '
+            'nav_front/nav_high_* camera to inspect fixtures, then relate a visible floor waypoint to that destination. '
+            'Use current-frame groundings only; old-frame pixel coordinates cannot be reused. '
+            'Prefer a floor region when a precise point is uncertain. Preserve an observation to verify arrival '
+            'and use finish when the task appears complete; movement alone is not success.')}
+    try:floor_z,_=navigation_floor(observed_points,robot_boundary)
+    except ValueError as exc:
+        context['floor_evidence_unavailable']=str(exc)
+        return context
+    mask=observed_floor_mask(obs,floor_z)
+    if robot_depth is not None:
+        # Do not advertise a robot silhouette or a return behind it as a floor
+        # suggestion. This filters advice only, never modifies map evidence.
+        robot_valid=np.isfinite(robot_depth)&(robot_depth>.005)&(robot_depth<10)
+        mask &= ~(robot_valid&(robot_depth<=obs.depth+.003))
+    context.update(floor_z_m=float(floor_z),floor_tolerance_m=.06,
+                   observed_floor_pixels=int(mask.sum()))
+    import cv2
+    distance=cv2.distanceTransform(np.pad(mask.astype(np.uint8),1),cv2.DIST_L2,3)[1:-1,1:-1]
+    h,w=mask.shape;v,u=np.mgrid[:h,:w]
+    for _ in range(3):
+        y,x=np.unravel_index(distance.argmax(),distance.shape)
+        if distance[y,x]<=0:break
+        point=unproject(np.array([x,y]),obs.depth[y,x],obs.K,obs.T_wc)
+        context['floor_samples'].append({'pixel':[int(x),int(y)],
+            'normalized_pixel':[float(x/(w-1)),float(y/(h-1))],'world_xyz_m':point.tolist()})
+        radius=max(8.,float(distance[y,x])*2)
+        distance[(u-x)**2+(v-y)**2<=radius**2]=0
+    return context
+
+
 def payload_envelope(points,spacing=.01):
     """Conservative filled observed AABB, not just an empty surface point set."""
     lo=np.min(points,axis=0)-.005;hi=np.max(points,axis=0)+.005
@@ -61,6 +150,89 @@ def envelope_boundary(points,tolerance=.011):
     """Exterior of an observed filled envelope for continuous sweep checks."""
     points=np.asarray(points);lo=points.min(0);hi=points.max(0)
     return points[np.any((points<=lo+tolerance)|(points>=hi-tolerance),axis=1)]
+
+
+@dataclass
+class ObservedPayload:
+    """Provisional collision geometry is distinct from an observed held object.
+
+    All points come from RGB-D and robot kinematics. This estimate is deliberately
+    conservative and never supplies the independent grasp-success score.
+    """
+    source: np.ndarray
+    surface: np.ndarray
+    envelope: np.ndarray
+    support_z: float
+    camera_id: str
+    state: str = 'closed_unverified'
+    source_retired: bool = False
+    pending_views: list = field(default_factory=list,repr=False)
+
+    @property
+    def holding(self):return self.state=='held'
+
+    def remember_view(self,observation,tracked,p,R):
+        # Save the actual world attachment pose now: old arm joints alone cannot
+        # reconstruct it once navigation changes base / torso auxiliary state.
+        tracked=None if tracked is None else np.asarray(tracked).copy()
+        self.pending_views.append((observation.frame_id,observation.camera_id,tracked,p.copy(),R.copy()))
+        self.pending_views=self.pending_views[-12:]
+
+    def visible_in(self,observation,p,R):
+        uv,z=project(self.surface@R.T+p,observation.K,observation.T_wc)
+        h,w=observation.depth.shape
+        return np.count_nonzero((z>.05)&np.isfinite(uv).all(axis=1)&
+            (uv[:,0]>=1)&(uv[:,0]<w-1)&(uv[:,1]>=1)&(uv[:,1]<h-1))>=20
+
+    def retire_views(self,maps):
+        """Retire measured associated surfaces, never the entire envelope."""
+        self.require_holding()
+        report=[];local_surfaces=[]
+        for frame_id,camera_id,tracked,p,R in self.pending_views:
+            if tracked is None:continue
+            points=np.asarray(tracked);points=points[np.isfinite(points).all(axis=1)]
+            expected=self.surface@R.T+p
+            close=cKDTree(expected).query(points)[0]<=.025
+            # Unrelated geometry returned by a loose tracker remains occupied.
+            if len(points)<20 or close.sum()<20 or close.mean()<.8:continue
+            matched=points[close]
+            for map_ in maps:map_.remove_target_endpoints(matched)
+            local_surfaces.append((matched-p)@R)
+            report.append({'frame_id':frame_id,'camera_id':camera_id,'associated_points':len(matched),
+                           'attachment_position':p.tolist(),'attachment_rotation':R.tolist()})
+        if local_surfaces:
+            # Newly associated side faces belong in future collision geometry
+            # as well as being retired from the static map. Fuse only measured
+            # points in the captured attachment frame; preserve axis extrema.
+            combined=np.vstack([self.surface,*local_surfaces])
+            _,indices=np.unique(np.round(combined/.005).astype(np.int32),axis=0,return_index=True)
+            extrema=np.r_[combined.argmin(axis=0),combined.argmax(axis=0)]
+            self.surface=combined[np.unique(np.r_[indices,extrema])]
+            self.envelope=payload_envelope(self.surface)
+        self.pending_views.clear()
+        return report
+
+    def verify(self,tracked,p,R,gripper_q):
+        expected=self.surface@R.T+p
+        tracked=np.asarray(tracked) if tracked is not None else np.empty((0,3))
+        points=tracked[np.isfinite(tracked).all(axis=1)]
+        aperture=float(abs(gripper_q[0]-gripper_q[1]))
+        close=cKDTree(expected).query(points)[0]<=.025 if len(points) else np.zeros(0,dtype=bool)
+        # A newly exposed upper face at the old source is not lift evidence.
+        # Require both upward displacement and association at the moved pose.
+        lift=float(np.median(points[:,2])-np.median(self.source[:,2])) if len(points) else None
+        matched=int(close.sum())
+        confirmed=bool(len(points)>=20 and matched>=20 and close.mean()>=.8
+                       and lift is not None and lift>=.08 and aperture>.006)
+        previously_held=self.state in ('held','held_unverified')
+        self.state='held' if confirmed else ('held_unverified' if previously_held else 'lift_unverified')
+        if not confirmed:self.pending_views.clear()
+        return {'holding':confirmed,'state':self.state,'tracked_points':len(points),
+                'associated_points':matched,'observed_lift_m':lift,'gripper_aperture_m':aperture}
+
+    def require_holding(self):
+        if not self.holding:
+            raise ValueError('execution: payload unverified; observe the gripper and object before moving or placing')
 
 
 def next_high_level_camera(strategy,decision,current_camera,rng):
@@ -93,6 +265,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
     sim=robot=vlm=resolver=evaluator=None
     events=[];history=[];start=time.monotonic();rng=np.random.default_rng(seed)
     safety_observations=0;payload=None;grip=-1.;phase='navigate' if task=='NavigateKitchen' else 'find_object'
+    framing=TargetFraming()
     budget=config.navigation_observations if task=='NavigateKitchen' else config.mobile_observations
     duration=config.navigation_sim_seconds if task=='NavigateKitchen' else config.mobile_sim_seconds
     def event(kind,**data):
@@ -131,7 +304,9 @@ def run_mobile_episode(task,seed,strategy,root,config):
         def acquire(camera=None,safety=False):
             nonlocal safety_observations
             if not safety:
-                if record.observations>=budget:raise RuntimeError('observation budget exhausted')
+                if record.observations>=budget:
+                    event('observation_budget_exhausted',observations=record.observations,budget=budget)
+                    raise RuntimeError('observation budget exhausted')
                 record.observations+=1
             else:safety_observations+=1
             robot.set_auxiliary_state(sim.auxiliary_state())
@@ -142,13 +317,42 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 map_.integrate(obs,robot.points(obs.q,obs.gripper_q)[0],self_depth,
                     robot.volumes(obs.q,obs.gripper_q),robot.visual_volumes(obs.q,obs.gripper_q))
                 map_.certify_robot_state(robot.points(obs.q,obs.gripper_q)[0],robot.volumes(obs.q,obs.gripper_q))
+            if payload is not None and payload.holding:
+                p,R=robot.pose(obs.q)
+                if payload.visible_in(obs,p,R):
+                    tracked=resolver.track(obs,payload.surface@R.T+p,self_depth,support_z=payload.support_z)
+                    payload.remember_view(obs,tracked,p,R)
             return obs,self_depth
 
         obs,self_depth=acquire()
 
+        def verify_payload(observation,robot_depth):
+            nonlocal phase
+            if payload is None or payload.state=='closed_unverified':return
+            p,R=robot.pose(observation.q)
+            saved=next((view for view in reversed(payload.pending_views) if view[0]==observation.frame_id),None)
+            tracked=saved[2] if saved is not None else resolver.track(
+                observation,payload.surface@R.T+p,robot_depth,support_z=payload.support_z)
+            evidence=payload.verify(tracked,p,R,observation.gripper_q)
+            event('payload_observation',frame_id=observation.frame_id,
+                camera_id=observation.camera_id,**evidence)
+            if payload.holding:
+                if saved is None:payload.remember_view(observation,tracked,p,R)
+                for map_ in (local,navmap):
+                    if not payload.source_retired:map_.remove_target_endpoints(payload.source)
+                associated=payload.retire_views((local,navmap))
+                arm.attached=payload.envelope
+                event('payload_map_association',views=associated)
+                payload.source_retired=True
+                payload.camera_id=observation.camera_id
+            else:
+                phase='verify_grasp'
+                history.append({'feedback':'Held-object association is missing or inconsistent. Base motion and placement are blocked; observe the gripper/object again.',
+                                'payload_evidence':evidence})
+
         def nav_planner():
-            floor_z,floor=support_plane(navmap.surface)
             world=robot.boundary_points(sim.q,sim.gripper_q)
+            floor_z,floor=navigation_floor(navmap.surface,world)
             # Match the 2 cm navigation lattice while preserving volumetric coverage.
             _,indices=np.unique(np.round(world/.02).astype(np.int32),axis=0,return_index=True)
             world=world[indices]
@@ -161,13 +365,17 @@ def run_mobile_episode(task,seed,strategy,root,config):
             if len(feet):floor=np.vstack([floor,feet])
             carried=None
             if payload is not None:
-                p,R=robot.pose(sim.q);held=payload@R.T+p
+                p,R=robot.pose(sim.q);held=payload.envelope@R.T+p
                 carried=transform_body(envelope_boundary(held)-np.r_[base[:2],0],[0,0,-base[2]])
             return SE2Planner(NavigationCollision(navmap,body,floor,floor_z,carried,
                 shadow_pose=base,shadow_distance=.03)),floor_z
 
         def drive(goal,hints=()):
             nonlocal obs,self_depth
+            if payload is not None:
+                payload.require_holding()
+                check_obs,check_depth=acquire(payload.camera_id,safety=True)
+                verify_payload(check_obs,check_depth);payload.require_holding()
             sim.phase='navigate_carrying' if payload is not None else 'navigate'
             hold=sim.q.copy();initial=sim.base_pose.copy()
             segments=0
@@ -189,6 +397,12 @@ def run_mobile_episode(task,seed,strategy,root,config):
                     time_budget=min(5.,config.planning_seconds))
                 record.planning_seconds+=time.monotonic()-planning_start
                 if path is None:
+                    diagnostic=nav.diagnostic()
+                    diagnostic.update(segment=segments,proposed_goal=np.asarray(goal).tolist(),
+                        local_goal=local_goal.tolist(),stage='plan')
+                    diagnostic_path=out/f'navigation_rejection_{len(events):04d}.json'
+                    diagnostic_path.write_text(json.dumps(diagnostic,indent=2))
+                    event('navigation_rejected',diagnostic=diagnostic_path.name,stage='plan')
                     raise ValueError('planning: '+nav.last_failure+'; '+nav.valid.last_failure+' (3 cm self-shadow certificate)')
                 np.save(out/f'navigation_path_{len(events):04d}_{segments:02d}.npy',path)
                 event('navigation_plan',waypoints=len(path),segment=segments,
@@ -200,7 +414,14 @@ def run_mobile_episode(task,seed,strategy,root,config):
                         velocity=velocity_command(now,waypoint,max_speed=.12,max_yaw=.25)
                         predicted=now.copy();c,s=np.cos(now[2]),np.sin(now[2])
                         predicted[:2]+=.05*np.array([[c,-s],[s,c]])@velocity[:2];predicted[2]+=.05*velocity[2]
-                        if not nav.edge(now,predicted):raise ValueError('planning: newly occupied base sweep')
+                        if not nav.edge(now,predicted):
+                            diagnostic=nav.diagnostic()
+                            diagnostic.update(segment=segments,proposed_goal=np.asarray(goal).tolist(),
+                                local_goal=local_goal.tolist(),velocity=velocity.tolist(),stage='control')
+                            diagnostic_path=out/f'navigation_rejection_{len(events):04d}.json'
+                            diagnostic_path.write_text(json.dumps(diagnostic,indent=2))
+                            event('navigation_rejected',diagnostic=diagnostic_path.name,stage='control')
+                            raise ValueError('planning: newly occupied base sweep')
                         step(hold,grip,velocity)
                 for _ in range(2):step(hold,grip,np.zeros(3))
                 moved=sim.base_pose-current
@@ -216,6 +437,11 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 for camera in (f'robot0_nav_{side}',f'robot0_nav_high_{side}',
                                'robot0_nav_floor','robot0_nav_overhead'):
                     obs,self_depth=acquire(camera,safety=True)
+                if payload is not None:
+                    # Recheck the object from the last camera that saw it. The
+                    # floor safety images alone cannot confirm it is still held.
+                    obs,self_depth=acquire(payload.camera_id,safety=True)
+                    verify_payload(obs,self_depth);payload.require_holding()
                 segments+=1
             for _ in range(3):step(hold,grip,np.zeros(3))
 
@@ -239,23 +465,53 @@ def run_mobile_episode(task,seed,strategy,root,config):
                     'robot0_nav_overhead':'high downward view of the complete robot silhouette and nearby floor; use when the full-body sweep remains unknown',
                     'robot0_agentview_left':'close manipulation view','robot0_agentview_right':'close manipulation view',
                     'robot0_eye_in_hand':'wrist camera; pose changes with the arm'},
-                'holding':payload is not None,'base_pose':sim.base_pose.tolist(),
+                'holding':payload is not None and payload.holding,
+                'payload_state':'empty' if payload is None else payload.state,'base_pose':sim.base_pose.tolist(),
                 'feedback':'Navigate using visible floor goals. Base motion is limited to 25 cm before observing again. Grasp only when target is reachable; place only when holding.'})
+            if task=='NavigateKitchen':
+                history[-1]['navigation_context']=navigation_observation_context(obs,navmap.surface,self_depth,
+                    robot_boundary=robot.boundary_points(obs.q,obs.gripper_q))
+            elif phase=='find_object' and payload is None and framing.target is not None:
+                # Predict framing from the last explicit object grounding and
+                # current robot-mounted calibration, without acquiring images.
+                try:
+                    history[-1]['target_framing']=framing.context(obs,
+                        {camera:sim.camera_calibration(camera) for camera in CAMERAS})
+                except ValueError as exc:
+                    history[-1]['target_framing_unavailable']=str(exc)
+                    event('target_framing_unavailable',frame_id=obs.frame_id,reason=str(exc))
             decision=vlm.decide(obs,sim.instruction,history)
             save_observation(out/'observations',obs,decision);event('decision',**decision.model_dump())
             record.grounding_types.extend(g.kind for g in decision.groundings)
+            if task!='NavigateKitchen' and phase=='find_object' and payload is None:
+                objects=[g for g in decision.groundings if g.role=='object']
+                identities={g.target_id for g in objects}
+                if framing.target is not None and identities and identities!={framing.target.target_id}:
+                    framing.clear()
+                    event('target_framing_cleared',reason='explicit target identity changed')
+                try:
+                    if framing.refresh(obs,objects,self_depth):
+                        event('target_framing_observed',target_id=framing.target.target_id,
+                            frame_id=obs.frame_id,camera_id=obs.camera_id,
+                            selection=framing.target.selection)
+                except ValueError as exc:
+                    # Framing advice is optional and never changes the action's
+                    # grounding or grants a planner exemption.
+                    history.append({'target_framing_rejected':str(exc),
+                        'feedback':'Object framing evidence was rejected; ground any action from the acquired current image.'})
+                    event('target_framing_rejected',frame_id=obs.frame_id,reason=str(exc))
             try:
                 if decision.action=='abort':record.failure='agent_abort: '+decision.reason;break
                 if decision.action=='finish':
                     sim.phase='verify'
                     for _ in range(45):step(sim.q,grip)
+                    record.failure='execution: independent success criterion not met after finish'
                     break
                 if decision.action=='navigate':
                     goals=[g for g in decision.groundings if g.role=='navigation_goal']
                     if not goals:raise ValueError('grounding: navigation_goal required')
-                    position=grounded_world(obs,goals[0]);_,floor=support_plane(navmap.surface)
-                    floor_z=float(np.median(floor[:,2]))
-                    if abs(position[2]-floor_z)>.06:raise ValueError('grounding: navigation goal is not on observed floor')
+                    floor_z,_=navigation_floor(navmap.surface,robot.boundary_points(sim.q,sim.gripper_q))
+                    position=grounded_world(obs,goals[0],floor_z=floor_z)
                     look=[g for g in decision.groundings if g.role=='look_at']
                     direction=grounded_world(obs,look[0])[:2]-position[:2] if look else position[:2]-sim.base_pose[:2]
                     goal=np.r_[position[:2],np.arctan2(direction[1],direction[0])]
@@ -269,6 +525,10 @@ def run_mobile_episode(task,seed,strategy,root,config):
                         goal=sim.base_pose.copy();goal[2]+=np.pi/8*(1 if motion=='turn_left' else -1)
                         drive(goal)
                     elif motion=='wrist':
+                        if payload is not None:
+                            payload.require_holding()
+                            check_obs,check_depth=acquire(payload.camera_id,safety=True)
+                            verify_payload(check_obs,check_depth);payload.require_holding()
                         path=None
                         for delta in (.3,-.3):
                             q=sim.q.copy();q[-1]+=delta
@@ -313,12 +573,16 @@ def run_mobile_episode(task,seed,strategy,root,config):
                                 'feedback':'The arm planner rejected these exact unknown path points. Observe the first recommended mounted camera that has not yet supplied the needed coverage; no unseen image was previewed.'})
                         raise ValueError('planning: '+arm.last_failure)
                     candidate,transit,approach=chosen
+                    framing.clear()
                     arm_execute(transit,-1,'pregrasp');arm_execute(approach,-1,'approach')
-                    sim.phase='close';record.attempts+=1
+                    sim.phase='close';record.attempts+=1;sim.episode_attempt=record.attempts
                     for _ in range(25):step(sim.q,1)
                     grip=1.;p,R=robot.pose(sim.q)
-                    payload=(payload_envelope(target)-p)@R
-                    arm.attached=payload;arm.gripper=sim.gripper_q
+                    payload=ObservedPayload(target.copy(),(target-p)@R,
+                        (payload_envelope(target)-p)@R,support,obs.camera_id)
+                    # Keep a possible object's envelope in collision checks,
+                    # but do not tell the policy that closing proves a grasp.
+                    arm.attached=payload.envelope;arm.gripper=sim.gripper_q
                     local.set_payload_source(target);local.remove_target_endpoints(target)
                     arm.begin_payload_lift()
                     obs,self_depth=acquire()
@@ -327,19 +591,43 @@ def run_mobile_episode(task,seed,strategy,root,config):
                     local.remove_target_endpoints(target)
                     lift=[sim.q];arm.allow_payload_support=True
                     try:
-                        for dz in np.linspace(.01,.13,14):
-                            q=arm.feasible_ik(p+[0,0,dz],R,lift[-1],contact=True,connected=True)
-                            if q is None:raise ValueError('planning: lift '+arm.last_failure)
-                            lift.append(q)
-                    finally:arm.allow_payload_support=False;arm.end_payload_lift()
-                    arm_execute(np.array(lift),grip,'lift');phase='carry_to_destination'
+                        try:
+                            for dz in np.linspace(.01,.13,14):
+                                q=arm.feasible_ik(p+[0,0,dz],R,lift[-1],contact=True,connected=True)
+                                if q is None:raise ValueError('planning: lift '+arm.last_failure)
+                                lift.append(q)
+                        finally:arm.allow_payload_support=False;arm.end_payload_lift()
+                    except ValueError:
+                        # No lift motion was executed. Release at the original
+                        # support rather than retaining a false carried state.
+                        sim.phase='release_failed_grasp';grip=-1.
+                        framing.clear()
+                        for _ in range(25):step(sim.q,grip)
+                        arm.attached=None;payload=None;arm.gripper=sim.gripper_q
+                        for map_ in (local,navmap):
+                            map_.set_target(np.empty((0,3)))
+                            map_.set_payload_source(np.empty((0,3)))
+                        phase='find_object'
+                        obs,self_depth=acquire(safety=True)
+                        event('grasp_released',reason='lift rejected before motion')
+                        raise
+                    payload.state='lift_unverified';phase='verify_grasp'
+                    arm_execute(np.array(lift),grip,'lift')
+                    sim.phase='hold'
+                    for _ in range(45):step(sim.q,grip)
+                    obs,self_depth=acquire(payload.camera_id)
+                    verify_payload(obs,self_depth);payload.require_holding()
+                    phase='carry_to_destination'
                 elif decision.action=='place':
                     if payload is None:raise ValueError('place requires a held object')
+                    payload.require_holding()
+                    check_obs,check_depth=acquire(payload.camera_id,safety=True)
+                    verify_payload(check_obs,check_depth);payload.require_holding()
                     regions=[g for g in decision.groundings if g.role=='place_region']
                     if not regions:raise ValueError('grounding: placement region required')
                     point=grounded_world(obs,regions[0]);p,R=robot.pose(sim.q)
                     local.set_table(point[2])
-                    bottom=float(np.min(payload@R.T,axis=0)[2])
+                    bottom=float(np.min(payload.envelope@R.T,axis=0)[2])
                     goal=point.copy();goal[2]-=bottom;goal[2]+=.01
                     above=goal+[0,0,.13];q=robot.ik(above,R,sim.q)
                     transfer=None if q is None else arm.plan(sim.q,q)
@@ -353,6 +641,7 @@ def run_mobile_episode(task,seed,strategy,root,config):
                             lower.append(q)
                     finally:arm.allow_payload_support=False
                     arm_execute(np.array(lower),grip,'lower');grip=-1.;sim.phase='release'
+                    framing.clear()
                     for _ in range(45):step(sim.q,grip)
                     arm.attached=None;payload=None;phase='verify'
                     local.clear_dynamic();navmap.clear_dynamic()
@@ -369,11 +658,27 @@ def run_mobile_episode(task,seed,strategy,root,config):
                 else:raise ValueError('unsupported action')
                 history.append({'decision':decision.model_dump(),'feedback':'action completed; verify from new observation'})
             except ValueError as exc:
-                history.append({'feedback':str(exc)});event('rejected',reason=str(exc));record.failure=str(exc)
+                details={}
+                if isinstance(exc,NavigationGroundingError):
+                    details={'decision':decision.model_dump(),'navigation_grounding':exc.diagnostics,
+                        'next_step':'Correct the non-floor grounding using the next current-frame floor evidence. A floor sample is not a collision-free route or a destination estimate.'}
+                history.append({'feedback':str(exc),**details})
+                event('rejected',reason=str(exc),**details);record.failure=str(exc)
                 record.geometry_rejections.append(str(exc))
-            if record.observations>=budget:break
+            if record.observations>=budget:
+                record.failure='observation budget exhausted'
+                event('observation_budget_exhausted',observations=record.observations,budget=budget)
+                break
             camera=next_high_level_camera(strategy,decision,sim.camera,rng)
             obs,self_depth=acquire(camera)
+            if payload is not None and payload.state!='closed_unverified':
+                p,R=robot.pose(obs.q)
+                # An image looking elsewhere is not evidence of a drop. When
+                # the predicted object is in view, update even a previously
+                # held estimate before the next policy decision.
+                if not payload.holding or payload.visible_in(obs,p,R):
+                    verify_payload(obs,self_depth)
+                    if payload.holding:phase='carry_to_destination'
         if not record.failure:record.failure='execution: independent success criterion not met'
     except KeyboardInterrupt:
         record.failure='interrupted during development';event('interrupted')
@@ -386,11 +691,14 @@ def run_mobile_episode(task,seed,strategy,root,config):
         record.elapsed_seconds=time.monotonic()-start
         if evaluator:
             truth=evaluator.result();record.success=truth['success'];record.collision=truth['collision']
+            record.first_grasp_success=truth['first_grasp_success']
             record.official_success=truth['official_success'];record.collision_free_success=truth['collision_free_success']
             record.path_length_m=truth['path_length_m'];record.held_path_length_m=truth['held_path_length_m']
             (out/'evaluation_truth.json').write_text(json.dumps(truth,indent=2))
             if record.success:record.failure=''
-        (out/'mobile_metrics.json').write_text(json.dumps({'safety_observations':safety_observations,'final_phase':phase},indent=2))
+        (out/'mobile_metrics.json').write_text(json.dumps({'safety_observations':safety_observations,'final_phase':phase,
+            'payload_state':'empty' if payload is None else payload.state,
+            'holding_estimate':payload is not None and payload.holding},indent=2))
         if sim:save_episode(out,sim,record,events);sim.close()
         else:(out/'result.json').write_text(json.dumps(asdict(record),indent=2))
         if robot:robot.close()

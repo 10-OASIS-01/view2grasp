@@ -1,6 +1,10 @@
 # Results and limitations
 
-## Latest handoff status (2026-10-10)
+## Receiving-machine validation (2026-10-12)
+
+See the [local handoff validation](handoff-local-validation.zh-CN.md) for new GLM episodes and remaining acceptance. `handoff-block-05` completed an online RGB-D block grasp without recorded collision, lifted approximately 0.1297 m, satisfied the independent success condition for approximately 3.3 s, and replayed all 232 saved states. `handoff-occluded-14` completed grasp, lift, hold, transfer and release without recorded collision; all 408 states were independently checked and replayed. These episodes have separate source snapshots and are single development successes. The mug lift/hold and both mobile tasks remain unaccepted. The original mentor `runs/` archive has not been transferred; historical claims below must not be presented as locally reproduced evidence.
+
+## Original handoff snapshot (2026-10-10)
 
 See the [handoff and completion roadmap](HANDOFF.zh-CN.md) for implementation priorities and exact evidence paths. The debugging milestones further below are historical, not the latest status for every task.
 
@@ -26,7 +30,7 @@ These are single-seed development results. Their source snapshots preserve the o
 
 ## Current scope (updated by user)
 
-The 300-episode benchmark is cancelled. Use small targeted development validation, not a seed/policy sweep. Prefer offline diagnosis of retained failures before more online calls. The first system demo is complete; update the final five-task demo after completion. `evaluate` defaults to at most 15 development episodes and rejects larger batches; this is a cap, not a requirement to launch another full batch.
+At the user’s request, M1 is closed out as an engineering handoff with known limitations. Block and occluded have accepted online episodes; the mug lift/hold remains unaccepted and is deferred from this closeout. See the [concise M1 status](M1-status.zh-CN.md). M0 is deferred; earlier M2/M3 changes are retained without continuing their online acceptance in this phase. The 300-episode benchmark is cancelled. Use small targeted development validation, not a seed/policy sweep. Prefer offline diagnosis of retained failures before more online calls. The first system demo is complete; the final five-task demo remains later work. `evaluate` defaults to at most 15 development episodes and rejects larger batches; this is a cap, not a requirement to launch another full batch.
 
 ## Measured engineering progress
 
@@ -67,7 +71,7 @@ All versions, failures, raw requests, and observations are retained under `runs/
 
 ## Remaining acceptance work
 
-- Resolve tabletop moved-object map association, conservative payload envelope, and preplanned lift coverage; revalidate all three tasks.
+- Finish the mug's strict moved-object association and lift/hold acceptance; retain the independently verified block and occluded episodes with their original source snapshots.
 - Resolve the remaining occupied-sweep rejection after navigation map accumulation; do not launch a seed sweep.
 - Complete base-motion navigation and grasp–carry–place–retreat in an eligible kitchen scene. Current mobile code is experimental; first-grasp scoring, carried-object association, and actual successful transport still need validation.
 - Preserve the same perception capabilities for every compared policy; freeze a small validation configuration once tasks work.

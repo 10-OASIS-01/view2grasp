@@ -2,7 +2,9 @@ import base64
 import hashlib
 import io
 import json
+from dataclasses import replace
 import httpx
+import numpy as np
 import pytest
 from PIL import Image
 from view2grasp.vlm import VLM
@@ -27,7 +29,9 @@ def test_repairs_bad_json_and_stale_frame_without_logging_secret(tmp_path,monkey
     monkeypatch.setenv('VLM_API_KEY','secret-for-test')
     responses=['not json',json.dumps({'action':'abort','frame_id':99}),json.dumps({'action':'abort','frame_id':1,'reason':'unreachable'})]
     client=VLM(tmp_path);client.client.close()
+    requests=[]
     def handler(request):
+        requests.append(json.loads(request.content))
         return httpx.Response(200,json={'model':'test-model','choices':[{'message':{'content':responses.pop(0)}}]})
     client.client=httpx.Client(transport=httpx.MockTransport(handler))
     answer=client.decide(observation(),'test',[])
@@ -35,6 +39,11 @@ def test_repairs_bad_json_and_stale_frame_without_logging_secret(tmp_path,monkey
     records=[p.read_text() for p in sorted(tmp_path.glob('*.json'))]
     assert all('secret-for-test' not in text for text in records)
     assert json.loads(records[-1])['error'] is None
+    assert [len(json.loads(row)['request']['messages']) for row in records]==[2,4,6]
+    for raw_record,request in zip(records,requests):
+        sent=json.loads(json.dumps(request['messages']))
+        sent[1]['content'][1]['image_url']['url']='../observations/frame_001.png'
+        assert json.loads(raw_record)['request']['messages']==sent
     messages=json.loads(records[-1])['request']['messages']
     assert len(messages)==6
     assert messages[2]=={'role':'assistant','content':'not json'}
@@ -46,6 +55,384 @@ def test_service_error_is_bounded(tmp_path):
     with pytest.raises(RuntimeError,match='VLM failure'):client.decide(observation(),'test',[])
     assert client.calls==3
     client.client.close()
+
+
+def test_tabletop_observe_repairs_missing_camera_fields_instead_of_using_defaults(tmp_path):
+    responses=[
+        {'action':'observe','frame_id':1,'reason':'Use azimuth 90, elevation 0, distance 1.3'},
+        {'action':'observe','frame_id':1,'azimuth':90,'elevation':0,'distance':1.3},
+    ]
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(responses.pop(0))}}]})))
+    try:
+        decision=client.decide(observation(),'Map the rejected path',[],force_observe=True)
+    finally:client.client.close()
+    assert client.calls==2
+    assert (decision.azimuth,decision.elevation,decision.distance)==(90,0,1.3)
+    first=json.loads((tmp_path/'call_000.json').read_text())
+    assert 'explicit azimuth, elevation and distance' in first['error']
+
+
+def test_mounted_observe_does_not_require_virtual_camera_orbit(tmp_path):
+    from dataclasses import replace
+    import numpy as np
+    obs=replace(observation(),base_pose=np.zeros(3))
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'observation_camera':'robot0_eye_in_hand',
+        })}}]})))
+    try:
+        decision=client.decide(obs,'Inspect the held object',[],force_observe=True)
+    finally:client.client.close()
+    assert client.calls==1 and decision.observation_camera=='robot0_eye_in_hand'
+    request=json.loads((tmp_path/'call_000.json').read_text())['request']
+    context=json.loads(request['messages'][1]['content'][0]['text'])
+    assert 'tabletop_camera_context' not in context
+
+
+def test_ik_observation_reselection_does_not_freeze_the_failed_ray(tmp_path):
+    replies=[{'action':'abort','frame_id':1},
+        {'action':'observe','frame_id':1,'azimuth':-150,'elevation':15,'distance':.9}]
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(replies.pop(0))}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    history=[{'coverage_advice':{'views':[[60,60,1.3]]}},
+        {'feedback':'pregrasp IK; current approach has no tested reachable pose'}]
+    try:
+        decision=client.decide(observation(),'Grasp the handle',history,force_observe=True,
+            observe_purpose='approach_reselection')
+    finally:client.client.close()
+    assert decision.action=='observe' and client.calls==2
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    assert context['must_observe_now'] and not context['must_ground_now']
+    assert 'mapping_context' not in context
+    reselection=context['approach_reselection_context']
+    assert reselection['purpose']=='approach_reselection'
+    assert 'NEW ray' in reselection['instructions']
+    assert context['history']==history
+    assert 'approach reselection step requires an observe action' in requests[1]['messages'][-1]['content']
+
+
+@pytest.mark.parametrize('reason',[
+    'all nominal gripper approaches intersect observed obstacles',
+    'all nominally unblocked candidates exhausted pregrasp IK seeds',
+    'all tested candidates failed pregrasp IK before spatial validity checks',
+])
+def test_approach_reselection_reports_the_actual_current_bounded_search_evidence(tmp_path,reason):
+    evidence={'frame_id':1,'camera_id':'activeview','reason':reason,
+        'kinematic_view_advice':{'views':[[-120,30,1.3]],'scope':'robot-only hypothesis'}}
+    history=[{'coverage_advice':{'views':[[90,0,1.3]]}}, {'approach_reselection':evidence}]
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'azimuth':-120,'elevation':30,'distance':1.3})}}]})))
+    try:client.decide(observation(),'Grasp the handle',history,force_observe=True,
+        observe_purpose='approach_reselection')
+    finally:client.client.close()
+    context=json.loads((tmp_path/'call_000.json').read_text())['request']['context']
+    actual=context['approach_reselection_context']
+    assert actual['reason']==reason and actual['evidence']==evidence
+    assert context['history']==history and 'mapping_context' not in context
+    assert 'Kinematic search found no valid pregrasp pose' not in actual['instructions']
+    assert 'neither establishes global infeasibility' in actual['instructions']
+    assert 'Revisiting an earlier view is allowed' in actual['instructions']
+    assert 'does not certify target visibility' in actual['instructions']
+
+
+@pytest.mark.parametrize('fault',['frame','camera'])
+def test_approach_reselection_does_not_present_stale_history_as_current_evidence(tmp_path,fault):
+    evidence={'frame_id':1,'camera_id':'activeview','reason':'old reason'}
+    evidence['frame_id' if fault=='frame' else 'camera_id']=99 if fault=='frame' else 'other'
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':1,'azimuth':150,'elevation':15,'distance':.9})}}]})))
+    try:client.decide(observation(),'Grasp the handle',[{'approach_reselection':evidence}],
+        force_observe=True,observe_purpose='approach_reselection')
+    finally:client.client.close()
+    actual=json.loads((tmp_path/'call_000.json').read_text())['request']['context']['approach_reselection_context']
+    assert actual['evidence'] is None and actual['reason'] is None
+
+
+def test_current_frame_crop_annotation_logs_the_actual_input_image(tmp_path):
+    obs=observation()
+    provenance={'source_frame_id':obs.frame_id,'source_camera_id':obs.camera_id,
+        'bounds_xyxy':[20,30,52,62],'source_shape':[100,100]}
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'observe','frame_id':obs.frame_id,'camera_id':obs.camera_id,
+            'azimuth':obs.view[0],'elevation':obs.view[1],'distance':obs.view[2],
+        })}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        client.decide(obs,'Annotate the same target',[
+            {'coverage_advice':{'views':[[60,60,1.3]]}}],force_observe=True,
+            observe_purpose='annotation',derived_image_context=provenance)
+    finally:client.client.close()
+    request=json.loads((tmp_path/'call_000.json').read_text())['request']
+    context=request['context']
+    assert 'mapping_context' not in context and 'approach_reselection_context' not in context
+    assert context['annotation_context']['acquires_new_observation'] is False
+    assert context['derived_image_context']==provenance
+    logged_image=request['messages'][1]['content'][1]['image_url']['url']
+    assert logged_image.startswith('input_frame_')
+    decoded=np.asarray(Image.open(tmp_path/logged_image).convert('RGB'))
+    assert hashlib.sha256(decoded.tobytes()).hexdigest()==request['image_sha256']
+    sent_data=requests[0]['messages'][1]['content'][1]['image_url']['url'].split(',',1)[1]
+    assert (tmp_path/logged_image).read_bytes()==base64.b64decode(sent_data)
+
+
+def test_crop_context_cannot_change_a_grasp_or_mapping_input(tmp_path):
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='only for current-frame annotation'):
+            client.decide(observation(),'test',[],derived_image_context={})
+    finally:client.client.close()
+    assert client.calls==0
+
+
+def test_annotation_companion_preserves_primary_coordinates_and_audits_both_images(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    from test_annotation_diagnostic import feedback
+    obs=observation();diagnostic=build_annotation_diagnostic(obs,feedback(obs))
+    requests=[]
+    reply={'action':'observe','frame_id':1,'azimuth':0,'elevation':55,'distance':.8,
+        'point':[15/31,16/31]}
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(reply)}}]})
+    source=tmp_path/'source';client=VLM(source);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        answer=client.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+            derived_image_context={'kind':'test_crop'},annotation_diagnostic=diagnostic)
+    finally:client.client.close()
+    assert answer.point==tuple(reply['point']) # Companion canvas never remaps the answer.
+    call=json.loads((source/'call_000.json').read_text());request=call['request'];context=request['context']
+    assert context['image_size']=={'width':32,'height':32}
+    assert 'FIRST image' in context['annotation_context']['instructions']
+    assert 'not object labels' in context['annotation_context']['instructions']
+    images=requests[0]['messages'][1]['content'][1:]
+    assert len(images)==2
+    for index,rgb in enumerate((obs.rgb,diagnostic.rgb),start=1):
+        sent=base64.b64decode(images[index-1]['image_url']['url'].split(',',1)[1])
+        saved=source/request['messages'][1]['content'][index]['image_url']['url']
+        assert saved.read_bytes()==sent
+        assert np.array_equal(np.asarray(Image.open(io.BytesIO(sent))),rgb)
+    metadata=context['annotation_diagnostic']
+    assert request['image_sha256']==metadata['source_rgb_sha256']
+    assert request['annotation_diagnostic_sha256']==metadata['diagnostic_rgb_sha256']
+    assert hashlib.sha256((source/request['messages'][1]['content'][2]['image_url']['url']).read_bytes()).hexdigest()==metadata['diagnostic_png_sha256']
+    assert 'data:image' not in (source/'call_000.json').read_text()
+    replay=VLM(tmp_path/'replay',replay=source)
+    try:
+        assert replay.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+            derived_image_context={'kind':'test_crop'},annotation_diagnostic=diagnostic).point==answer.point
+    finally:replay.client.close()
+    for name,wrong in [('missing',None),('different',build_annotation_diagnostic(obs,feedback(obs,((7,7),))))]:
+        replay=VLM(tmp_path/name,replay=source)
+        try:
+            with pytest.raises(RuntimeError,match='diagnostic image mismatch'):
+                replay.decide(obs,'Annotate',[],force_observe=True,observe_purpose='annotation',
+                    derived_image_context={'kind':'test_crop'},annotation_diagnostic=wrong)
+        finally:replay.client.close()
+
+
+def test_annotation_companion_rejected_for_mapping_or_different_current_image(tmp_path):
+    from view2grasp.annotation_diagnostic import build_annotation_diagnostic
+    from test_annotation_diagnostic import feedback
+    obs=observation();diagnostic=build_annotation_diagnostic(obs,feedback(obs));client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='require current-frame annotation or an actual grounding refinement correction'):
+            client.decide(obs,'test',[],annotation_diagnostic=diagnostic)
+        changed=replace(obs,rgb=np.ones_like(obs.rgb))
+        with pytest.raises(ValueError,match='current unmarked image'):
+            client.decide(changed,'test',[],force_observe=True,observe_purpose='annotation',annotation_diagnostic=diagnostic)
+        assert client.calls==0
+    finally:client.client.close()
+
+
+@pytest.mark.parametrize('mounted,forced',[(True,True),(False,False)])
+def test_approach_reselection_is_only_a_forced_tabletop_step(tmp_path,mounted,forced):
+    obs=replace(observation(),base_pose=np.zeros(3) if mounted else None)
+    client=VLM(tmp_path)
+    try:
+        with pytest.raises(ValueError,match='forced tabletop observation'):
+            client.decide(obs,'test',[],force_observe=forced,observe_purpose='approach_reselection')
+        assert client.calls==0
+    finally:client.client.close()
+
+
+@pytest.mark.parametrize('fault',['null_orbit','future_camera','stale_frame','grounding_camera','tool_source'])
+def test_mounted_repair_states_complete_source_contract_and_never_relabels_output(tmp_path,fault):
+    obs=replace(observation(),frame_id=17,camera_id='robot0_agentview_left',base_pose=np.zeros(3))
+    valid={'action':'observe','frame_id':17,'camera_id':obs.camera_id,
+        'observation_camera':'robot0_nav_front','observation_motion':'none',
+        'groundings':[{'kind':'points','role':'object','frame_id':17,'camera_id':obs.camera_id,
+                       'source':'vlm','points':[[.5,.5]]}]}
+    bad=json.loads(json.dumps(valid))
+    if fault=='null_orbit':
+        # Reproduce the real first navigation response: both null orbit fields
+        # and an incorrect top-level future camera must be fixed in one repair.
+        bad.update(azimuth=None,elevation=None,distance=None,camera_id='robot0_nav_front')
+    elif fault=='future_camera':
+        bad['camera_id']='robot0_nav_front';bad['groundings'][0]['camera_id']='robot0_nav_front'
+    elif fault=='stale_frame':
+        bad['frame_id']=16;bad['groundings'][0]['frame_id']=16
+    elif fault=='grounding_camera':bad['groundings'][0]['camera_id']='robot0_nav_front'
+    else:bad['groundings'][0]['source']='rgbd'
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        response=bad if len(requests)==1 else valid
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(response)}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        decision=client.decide(obs,'Navigate to the oven',[
+            {'available_cameras':[obs.camera_id,'robot0_nav_front']}])
+    finally:client.client.close()
+    assert client.calls==2 and decision.camera_id==obs.camera_id
+    assert decision.observation_camera=='robot0_nav_front'
+    assert not {'azimuth','elevation','distance'} & decision.model_fields_set
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    correction=requests[1]['messages'][-1]['content']
+    for instructions in (context['response_contract'],correction):
+        assert 'frame_id must be 17' in instructions
+        assert 'camera_id must be "robot0_agentview_left"' in instructions
+        assert 'Every grounding must use these exact same' in instructions
+        assert 'ONLY observation_camera names the requested NEXT camera' in instructions
+        assert 'OMIT azimuth, elevation, and distance entirely' in instructions
+        assert 'do not send null' in instructions and 'source="vlm"' in instructions
+    first=json.loads((tmp_path/'call_000.json').read_text())
+    assert first['error'] and len(first['request']['messages'])==2
+    assert json.loads(first['response']['choices'][0]['message']['content'])==bad
+    second=json.loads((tmp_path/'call_001.json').read_text())
+    assert second['error'] is None and len(second['request']['messages'])==4
+
+
+def test_mounted_legacy_numeric_orbit_fields_remain_compatible(tmp_path):
+    obs=replace(observation(),camera_id='robot0_agentview_left',base_pose=np.zeros(3))
+    answer={'action':'observe','frame_id':1,'camera_id':obs.camera_id,
+        'observation_camera':'robot0_nav_front','azimuth':0,'elevation':0,'distance':.55}
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200,json={'choices':[{'message':{'content':json.dumps(answer)}}]})))
+    try:decision=client.decide(obs,'Navigate to the oven',[])
+    finally:client.client.close()
+    assert client.calls==1 and decision.observation_camera=='robot0_nav_front'
+
+
+def _orbit_observation(azimuth=0):
+    from view2grasp.geometry import orbit_pose
+    return replace(observation(),rgb=np.zeros((128,256,3),dtype=np.uint8),
+        depth=np.ones((128,256)),K=np.array([[240.,0.,127.5],[0.,180.,63.5],[0.,0.,1.]]),
+        T_wc=orbit_pose(azimuth,60,1.),view=(azimuth,60.,1.))
+
+
+@pytest.mark.parametrize('azimuth,x_direction,y_direction',[
+    (0,(0,1),(1,0)), # +X down and +Y right, not the usual drawing axes.
+    (90,(-1,0),(0,1)),
+    (180,(0,-1),(-1,0)),
+])
+def test_tabletop_calibration_tracks_world_axes_as_camera_orbits(azimuth,x_direction,y_direction):
+    from view2grasp.vlm import _tabletop_camera_context
+    # Deliberately stale display angles: measured T_wc must determine directions.
+    context=_tabletop_camera_context(replace(_orbit_observation(azimuth),view=(0,80,1.3)))
+    axes=context['world_axes_normalized_delta']
+    for axis,expected in (('+X',x_direction),('+Y',y_direction)):
+        vector=np.asarray(axes[axis]);vector/=np.linalg.norm(vector)
+        assert np.allclose(vector,expected,atol=1e-5)
+    assert axes['+Z'][1]<0
+    assert context['reference_normalized_uv']==[.5,.5]
+
+
+def test_camera_axis_deltas_are_normalized_calibrated_displacements():
+    from view2grasp.vlm import _tabletop_camera_context
+    obs=_orbit_observation();context=_tabletop_camera_context(obs)
+    axes=context['world_axes_normalized_delta']
+    # At azimuth 0, +Y is parallel to the image plane, 1 m from the camera:
+    # a 0.1 m shift is 240 * 0.1 = 24 pixels, or 24 / (width-1).
+    assert axes['+Y']==pytest.approx([24/255,0],abs=1e-6)
+    # +X also moves toward this 60-degree elevated camera, reducing depth to
+    # 0.95 m. Its vertical displacement is 0.1*sin(60), with fy=180.
+    assert axes['+X']==pytest.approx([0,180*.1*np.sqrt(3)/2/.95/127],abs=1e-6)
+    assert context['axis_step_m']==.1 and context['reference_world_m']==[-.12,0.,.95]
+    assert 'not object geometry or free-space' in context['scope']
+    scaled_K=obs.K.copy();scaled_K[:2]*=2
+    resized=replace(obs,rgb=np.zeros((255,511,3),dtype=np.uint8),K=scaled_K)
+    assert _tabletop_camera_context(resized)['world_axes_normalized_delta']==axes
+    # Rendering content and scene depth do not participate in calibration hints.
+    assert _tabletop_camera_context(replace(obs,rgb=np.full_like(obs.rgb,255),
+        depth=np.full_like(obs.depth,np.nan)))==context
+
+
+def test_camera_axis_context_is_omitted_for_unrelated_cameras_or_invalid_projection():
+    from view2grasp.vlm import _tabletop_camera_context
+    obs=_orbit_observation()
+    assert _tabletop_camera_context(replace(obs,base_pose=np.zeros(3))) is None
+    assert _tabletop_camera_context(replace(obs,camera_id='api_probe')) is None
+    invalid=obs.K.copy();invalid[0,0]=np.nan
+    assert _tabletop_camera_context(replace(obs,K=invalid)) is None
+    behind=obs.T_wc.copy();behind[:3,3]+=behind[:3,2]*2
+    assert _tabletop_camera_context(replace(obs,T_wc=behind)) is None
+
+
+def test_calibrated_axes_are_serialized_in_tabletop_vlm_request(tmp_path):
+    requests=[]
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200,json={'choices':[{'message':{'content':json.dumps({
+            'action':'abort','frame_id':1})}}]})
+    client=VLM(tmp_path);client.client.close()
+    client.client=httpx.Client(transport=httpx.MockTransport(handler))
+    try:client.decide(_orbit_observation(),'Choose a broadside view',[])
+    finally:client.client.close()
+    context=json.loads(requests[0]['messages'][1]['content'][0]['text'])
+    axes=context['tabletop_camera_context']['world_axes_normalized_delta']
+    assert axes['+Y']==pytest.approx([24/255,0],abs=1e-6)
+    assert 'image-left is NOT automatically world -X' in requests[0]['messages'][0]['content']
+
+
+def test_mapping_context_tracks_only_views_after_latest_advice():
+    from dataclasses import replace
+    from view2grasp.vlm import _mapping_context
+    advice={'views':[[-180,-10,1.3],[90,-10,1.3],[150,30,1.3]]}
+    history=[{'view':[150,30,1.3]}, {'coverage_advice':advice},
+             {'view':[180,-10,1.3]}]
+    context=_mapping_context(replace(observation(),view=(90,-10,1.3)),history)
+    assert context['unvisited_advised_views']==[[150,30,1.3]]
+    assert context['latest_coverage_advice']==advice
+    assert history[-1]['view']==[180,-10,1.3]
+
+
+@pytest.mark.parametrize('latest',[None,{'views':[]}])
+def test_mapping_context_does_not_resurrect_stale_advice(latest):
+    from view2grasp.vlm import _mapping_context
+    context=_mapping_context(observation(),[
+        {'coverage_advice':{'views':[[90,-10,1.3]]}}, {'coverage_advice':latest}])
+    assert context['latest_coverage_advice']==latest
+    assert context['unvisited_advised_views']==[]
+
+
+def test_post_close_advice_can_reacquire_the_previous_camera_view():
+    from dataclasses import replace
+    from view2grasp.vlm import _mapping_context
+    view=[90,-10,1.3]
+    obs=replace(observation(),view=tuple(view))
+    context=_mapping_context(obs,[{'coverage_advice':{'views':[view]},
+                                  'scene_changed_since_observation':True}])
+    assert context['scene_changed_since_observation'] is True
+    assert context['views_in_current_transaction']==[]
+    assert context['unvisited_advised_views']==[view]
 
 def test_timeout_is_bounded_and_logged(tmp_path):
     client=VLM(tmp_path);client.client.close()

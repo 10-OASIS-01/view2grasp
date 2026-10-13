@@ -71,7 +71,36 @@ def pixel_point(obs, xy, table_z=None):
     return p
 
 
+def has_explicit_object_seeds(decision):
+    """Membership seeds, excluding polygon boundary vertices and part seeds."""
+    return any(g.role=='object' and g.kind!='polygon' and g.points
+               for g in decision.groundings)
+
+
 def extract_target(obs, decision, table_z,observed_points=None,object_mask=None):
+    if has_explicit_object_seeds(decision):
+        # Only the resolver's seed-selected measured components are membership
+        # evidence. A broad box or projection of historical map surfaces cannot
+        # establish identity or visibility of pixels behind the current depth.
+        if object_mask is None:
+            raise ValueError('explicit object seeds require a resolved object mask')
+        if decision.frame_id!=obs.frame_id or decision.camera_id!=obs.camera_id:
+            raise ValueError('explicit object components require the current frame and camera')
+        mask=np.asarray(object_mask,dtype=bool)
+        if mask.shape!=obs.depth.shape:
+            raise ValueError('object mask resolution differs from observation')
+        anchor=pixel_point(obs,decision.point,table_z)
+        v,u=np.where(mask)
+        depth=obs.depth[v,u]
+        pts=unproject(np.stack([u,v],-1),depth,obs.K,obs.T_wc)
+        if (not np.isfinite(pts).all() or np.any((depth<=.05)|(depth>=10))
+                or np.any(pts[:,2]<=table_z+.006)):
+            raise ValueError('resolved object mask contains invalid measured surface')
+        if len(pts)<8:
+            raise ValueError('too few object depth points')
+        # Preserve every selected current-frame component, including islands
+        # that stride sampling or a second contact-only flood would discard.
+        return anchor,pts
     h, w = obs.depth.shape
     x0, y0, x1, y1 = np.asarray(decision.bbox) * [w-1, h-1, w-1, h-1]
     v, u = np.mgrid[int(y0):int(y1)+1:2, int(x0):int(x1)+1:2]
@@ -121,6 +150,8 @@ def part_cloud(obs,decision,target,mask=None):
 def grasp_candidates(obs: Observation, decision: AgentDecision, table_z, rotation_hint=None,grasp_offset=None,observed_points=None,object_mask=None,part_mask=None):
     if decision.frame_id != obs.frame_id:
         raise ValueError("stale frame")
+    if has_explicit_object_seeds(decision) and part_mask is None:
+        raise ValueError('explicit object seeds require a resolved grasp-part mask')
     p, target = extract_target(obs, decision, table_z,observed_points,object_mask)
     part=part_cloud(obs,decision,target,part_mask)
     if len(part)<4:raise ValueError('insufficient observed grasp-part geometry')

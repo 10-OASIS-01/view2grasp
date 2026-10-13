@@ -45,6 +45,10 @@ def replay_episode(episode,output):
         expected=len(sim.get_state().flatten())
         if data['states'].shape[1]!=expected:raise ValueError('recorded states do not match scene dimensions')
         context=MjRenderContextOffscreen(sim,device_id=-1,max_width=1280,max_height=720)
+        # Match the live robosuite renderer: group 0 contains collision proxies,
+        # while group 1 contains the visual meshes seen by the agent.
+        context.vopt.geomgroup[0]=0
+        context.vopt.geomgroup[1]=1
         sim.add_render_context(context)
         with imageio.get_writer(output,fps=20,codec="libx264",quality=8) as writer:
             for state in data["states"]:

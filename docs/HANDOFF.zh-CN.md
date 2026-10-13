@@ -2,6 +2,8 @@
 
 更新时间：2026-10-10。代码基线：[`58d4e10`](https://github.com/10-OASIS-01/view2grasp/commit/58d4e10c6419702f17761ce704b86e1927c162bf)。仓库：[10-OASIS-01/view2grasp](https://github.com/10-OASIS-01/view2grasp)。本文面向接手实现的同学；“建议”与“已验证结果”分别注明。
 
+2026-10-11 接手机器的新修复、GLM 在线运行和验收状态见 [本机验证记录](handoff-local-validation.zh-CN.md)。下文保留原始交接快照；导师原始 `runs/` 尚未取得，本机新增记录与历史证据分别注明。
+
 先看 [4 分 51 秒系统演示](../artifacts/demo-v1/view2grasp_explained_1080p.mp4)，再看本文。视频包含主动观察、grounding、深度反投影、抓取姿态、未知空间和运动规划原理，也保留了未完成的运行。视频中的成功不代表五个任务已经全部完成。
 
 ## 1. 接手后要完成什么

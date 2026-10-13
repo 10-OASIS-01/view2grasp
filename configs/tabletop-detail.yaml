@@ -1,0 +1,6 @@
+# Targeted development of small, partially occluded tabletop objects.
+# Keep the original eight observations and all metric safety thresholds.
+# 1024 RGB-D sampling reduces the measured surface gap between adjacent pixels;
+# enlarging a saved 512 image cannot supply this missing depth information.
+max_observations: 8
+image_size: 1024

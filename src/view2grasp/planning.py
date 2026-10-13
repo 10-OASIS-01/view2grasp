@@ -198,6 +198,24 @@ class RobotModel:
         if not np.isfinite(result).all():raise ValueError('nonfinite robot boundary proxy')
         return result
 
+    def gripper_local_points(self,q,gripper=None):
+        """Known gripper collision samples in TCP coordinates, with pad labels.
+
+        The gripper's own joints stay fixed at the requested proprioceptive
+        opening. Scene geometry and arm samples cannot enter this rigid proxy.
+        """
+        saved=self.data.qpos.copy()
+        try:
+            points,pads=self.points(q,gripper);p,R=self.pose();indices=[];start=0
+            for _,local,_,name in self.parts:
+                if name.startswith('gripper'):
+                    indices.extend(range(start,start+len(local)))
+                start+=len(local)
+            return (points[indices]-p)@R,pads[indices].copy()
+        finally:
+            self.data.qpos[:]=saved
+            mujoco.mj_forward(self.model,self.data)
+
     def contact_zone(self,points,tolerance=.002):
         result=np.zeros(len(points),dtype=bool)
         for gid,_,pad,_ in self.parts:
@@ -296,10 +314,23 @@ class Planner:
     def __init__(self,robot,map_,rng):
         self.robot=robot; self.map=map_; self.rng=rng; self.last_failure=""; self.checks=0
         self.attached=None; self.gripper=None; self.last_bad=0;self.deadline=None
+        # Optional independently grounded grasp part, in the same TCP frame.
+        # None preserves legacy attachment contact; an empty array permits none.
+        # Whole-object observations and registered predictions never expand it.
+        self.attached_contact_local=None
+        # Additional strictly associated observed surfaces affect collision
+        # checks only. They never change semantic references or finger contact.
+        self.observed_payload_local=None
+        # Registration hypotheses add collision checks only. Keep them separate
+        # from actually observed points and from finger/contact permissions.
+        self.registered_payload_local=None
         self.allow_payload_support=False;self.payload_lift_origin=None
         self.failure_counts=Counter();self.best_bad=100000;self.best_unknown=None
         self.closest_invalid=None;self.closest_by_failure={};self.unknown_samples=[];self.unknown_sample_count=0
         self.payload_invalid=None
+        self.last_validation=None
+        self.geometry_ranking={}
+        self._geometry_time_budget=8.
 
     def begin_payload_lift(self):
         """Record the observation-derived attachment pose for vertical lift."""
@@ -309,6 +340,21 @@ class Planner:
     def end_payload_lift(self):
         self.payload_lift_origin=None
 
+    def add_observed_payload(self,points,position,rotation):
+        """Accumulate measured held surfaces in TCP coordinates for safety only."""
+        if self.attached is None:raise ValueError('cannot extend an unattached payload')
+        points=np.asarray(points,dtype=float)
+        if points.ndim!=2 or points.shape[1]!=3 or not np.isfinite(points).all():
+            raise ValueError('observed payload requires finite 3D surface points')
+        local=(points-np.asarray(position))@np.asarray(rotation)
+        previous=self.observed_payload_local
+        self.observed_payload_local=np.unique(local if previous is None else np.vstack([previous,local]),axis=0)
+
+    def payload_collision_local(self):
+        """Original attachment plus new observations, without changing contact."""
+        extras=[p for p in (self.observed_payload_local,self.registered_payload_local) if p is not None]
+        return np.vstack([self.attached,*extras]) if extras else self.attached
+
     def recovery_unknown(self):
         """Representative actually-rejected unknown robot points for next view."""
         if not self.unknown_samples:return np.empty((0,3))
@@ -317,11 +363,28 @@ class Planner:
         return points[index]
 
     def valid(self,q,contact=False):
+        # Per-call effective refusals, after the ordinary contact/source rules.
+        # Keep this separate from historical closest-branch diagnostics.
+        self.last_validation={'q':np.asarray(q).tolist(),'complete':False,'valid':None,
+            'failure':'','robot_unknown_points':[],'robot_occupied_points':[],
+            'payload_unknown_points':[],'payload_occupied_points':[],
+            'robot_unknown_count':0,'robot_occupied_count':0,
+            'payload_unknown_count':0,'payload_occupied_count':0,
+            'sample_limit_per_state':200}
+        def finish(value):
+            self.last_validation.update(complete=True,valid=bool(value),
+                failure='' if value else self.last_failure)
+            return value
+        def record_states(prefix,points,state):
+            for label,code in (('unknown',UNKNOWN),('occupied',OCCUPIED)):
+                selected=points[state==code]
+                self.last_validation[f'{prefix}_{label}_count']=len(selected)
+                self.last_validation[f'{prefix}_{label}_points']=selected[:200].tolist()
         if self.deadline is not None and time.monotonic()>self.deadline:raise PlanningBudgetExceeded
         self.checks+=1
         if np.any(q<self.robot.limits[:,0]) or np.any(q>self.robot.limits[:,1]):
             self.last_bad=100000
-            self.last_failure="joint limits"; return False
+            self.last_failure="joint limits"; return finish(False)
         pts,pads=self.robot.points(q,self.gripper)
         # Actual robot self contacts in the independent robot-only model.
         for c in self.robot.data.contact:
@@ -329,7 +392,7 @@ class Planner:
                 b1=self.robot.model.geom_bodyid[c.geom1]; b2=self.robot.model.geom_bodyid[c.geom2]
                 if b1!=b2 and self.robot.model.body_parentid[b1]!=b2 and self.robot.model.body_parentid[b2]!=b1:
                     self.last_bad=100000
-                    self.last_failure="self collision"; return False
+                    self.last_failure="self collision"; return finish(False)
         state=self.map.classify(pts)
         target_hit=np.zeros(len(pts),dtype=bool)
         if contact:
@@ -338,11 +401,15 @@ class Planner:
             state[pads & allowed]=FREE
         if self.attached is not None:
             p,R=self.robot.pose()
-            held=self.attached@R.T+p
-            touching=cKDTree(held).query(pts,distance_upper_bound=.012)[0]<.012
+            contact_local=(self.attached if self.attached_contact_local is None
+                else self.attached_contact_local)
+            held_contact=contact_local@R.T+p
+            touching=(cKDTree(held_contact).query(pts,distance_upper_bound=.012)[0]<.012
+                if len(held_contact) else np.zeros(len(pts),dtype=bool))
             # Removing the held object's old endpoints leaves static obstacles
             # intact. Never waive a remaining observed obstacle near the payload.
             state[pads & touching & (state!=OCCUPIED)]=FREE
+        record_states('robot',pts,state)
         bad=state!=FREE
         unknown_points=pts[state==UNKNOWN]
         if len(unknown_points) and self.unknown_sample_count<5000:
@@ -367,12 +434,13 @@ class Planner:
                 self.closest_by_failure[self.last_failure]={'count':self.last_bad,
                     'q':np.asarray(q).tolist(),'points':pts[bad][:100].tolist(),
                     'unknown':int(np.sum(state==UNKNOWN))}
-            return False
+            return finish(False)
         if self.attached is not None:
             p,R=self.robot.pose()
-            held=self.attached@R.T+p
+            payload_local=self.payload_collision_local()
+            held=payload_local@R.T+p
             if hasattr(self.robot,'payload_intersects_noncontact_robot') and self.robot.payload_intersects_noncontact_robot(held):
-                self.last_failure='carried object intersects non-contact robot';return False
+                self.last_failure='carried object intersects non-contact robot';return finish(False)
             state=self.map.classify(held)
             # Sparse source surfaces certify only nearby UNKNOWN cells vacated
             # by the moving payload; observed occupied cells are never waived.
@@ -382,17 +450,26 @@ class Planner:
             if (self.allow_payload_support and self.payload_lift_origin is not None and
                     hasattr(self.map,'payload_vertical_lift_shadow')):
                 p0,R0=self.payload_lift_origin
-                lift_source=self.attached@R0.T+p0
+                lift_source=payload_local@R0.T+p0
                 lift_shadow=self.map.payload_vertical_lift_shadow(lift_source,held)
+                # Registered historical points are pose predictions, not
+                # measured source surfaces. The legacy vertical-shadow rule
+                # cannot establish FREE for this appended hypothesis subset.
+                if self.registered_payload_local is not None and len(self.registered_payload_local):
+                    lift_shadow[-len(self.registered_payload_local):]=False
                 state[lift_shadow & (state==UNKNOWN)]=FREE
             if self.allow_payload_support and hasattr(self.map,'support_contact_allowed'):
                 state[(state==OCCUPIED)&self.map.support_contact_allowed(held)]=FREE
+            record_states('payload',held,state)
             if np.any(state!=FREE):
                 bad=state!=FREE
                 bad_points=held[bad][:200]
-                self.payload_invalid={'unknown':int(np.sum(state==UNKNOWN)),
+                self.payload_invalid={'q':np.asarray(q).tolist(),
+                    'unknown':int(np.sum(state==UNKNOWN)),
                     'occupied':int(np.sum(state==OCCUPIED)),
                     'points':bad_points.tolist(),
+                    'point_states':state[bad][:200].tolist(),
+                    'payload_point_indices':np.flatnonzero(bad)[:200].tolist(),
                     'free_margin':(self.map.free_margin(bad_points).tolist()
                         if hasattr(self.map,'free_margin') else [])}
                 if lift_source is not None:
@@ -402,8 +479,8 @@ class Planner:
                         lift_shadow=lift_shadow[bad][:200].tolist())
                 self.last_failure=("carried object unknown space" if np.any(state==UNKNOWN)
                     else "carried object observed obstacle")
-                return False
-        return True
+                return finish(False)
+        return finish(True)
 
     def feasible_ik(self,position,rotation,seed,contact=False,connected=False):
         q=self.robot.ik(position,rotation,seed)
@@ -491,24 +568,74 @@ class Planner:
             path.append(q)
         return np.array(path)
 
-    def choose(self,q,candidates,max_candidates=48,time_budget=120):
+    def choose(self,q,candidates,max_candidates=48,time_budget=120,*,prioritize_gripper_geometry=False,diversify_attempts=False):
         # Diagnostics and targeted next-view advice describe this planning
         # attempt only. Keeping an earlier one-point miss would send recovery
         # toward a region that a later observation may already have revealed.
         self.last_failure="";self.last_bad=0;self.best_bad=100000
         self.best_unknown=None;self.closest_invalid=None;self.closest_by_failure={};self.failure_counts=Counter()
         self.unknown_samples=[];self.unknown_sample_count=0
+        self.geometry_ranking={}
+        self._geometry_time_budget=min(8.,max(0.,float(time_budget))*.25)
         self.deadline=time.monotonic()+time_budget
-        try:return self._choose(q,candidates,max_candidates)
+        try:return self._choose(q,candidates,max_candidates,prioritize_gripper_geometry,diversify_attempts)
         except PlanningBudgetExceeded:
             cause="unknown space" if len(self.recovery_unknown()) else self.last_failure
             self.last_failure="planning budget exhausted: "+cause
             return None
         finally:self.deadline=None
 
-    def _choose(self,q,candidates,max_candidates):
+    def _geometry_priority(self,q,candidates):
+        """Rank nominally unobstructed grippers first; never approve or reject IK.
+
+        A known obstacle later on the approach can be hidden by an earlier arm
+        UNKNOWN rejection. This cheap rigid proxy considers every original
+        candidate before the fixed search subset is selected. UNKNOWN remains
+        unverified; all normal robot, map and path checks still run afterward.
+        """
+        started=time.monotonic();preferred=[]
+        precheck_deadline=started+self._geometry_time_budget
+        if self.deadline is not None:precheck_deadline=min(precheck_deadline,self.deadline)
+        info={'input_candidates':len(candidates),'checked_candidates':0,
+            'nominal_clear_candidates':0,'nominal_blocked_candidates':0,
+            'incomplete_candidates':len(candidates),'status':'unavailable',
+            'scope':'ordering only; no observed gripper obstacle is not a free-space certificate',
+            'precheck_seconds':0.,'precheck_budget_seconds':self._geometry_time_budget}
+        self.geometry_ranking=info
+        if not hasattr(self.robot,'gripper_local_points'):return preferred
+        try:
+            def expired():
+                now=time.monotonic()
+                if now<precheck_deadline:return False
+                info['status']='time_budget'
+                info['stop_reason']=('planning_time_budget' if self.deadline is not None and now>=self.deadline
+                    else 'precheck_time_budget')
+                return True
+            if expired():return preferred
+            local,pads=self.robot.gripper_local_points(q,self.gripper)
+            info['gripper_samples']=len(local)
+            if not len(local):return preferred
+            info['status']='complete'
+            for g in candidates:
+                blocked=False
+                for offset in np.linspace(.08,0,17):
+                    if expired():return preferred
+                    points=local@g.rotation.T+g.position-g.approach*offset
+                    state=self.map.classify(points).copy()
+                    if offset<.012:
+                        allowed=self.map.contact_allowed(points) if hasattr(self.map,'contact_allowed') else self.map.is_target(points)
+                        state[pads&allowed]=FREE
+                    if np.any(state==OCCUPIED):blocked=True;break
+                info['checked_candidates']+=1
+                info['incomplete_candidates']-=1
+                if blocked:info['nominal_blocked_candidates']+=1
+                else:preferred.append(g);info['nominal_clear_candidates']+=1
+            return preferred
+        finally:info['precheck_seconds']=time.monotonic()-started
+
+    @staticmethod
+    def _candidate_subset(candidates,current_R,max_candidates):
         # Favor the equivalent gripper orientation closest to the current wrist.
-        _,current_R=self.robot.pose(q)
         candidates=sorted(candidates,key=lambda g:.08*g.score+np.linalg.norm(Rotation.from_matrix(g.rotation@current_R.T).as_rotvec()))
         if len(candidates)>max_candidates:
             # Candidates occur in three insertion depths per orientation. Use
@@ -530,17 +657,50 @@ class Planner:
                 selected.append(remaining.pop(int(np.argmax(score))))
             candidates=[g for group in selected for g in group[1]][:max_candidates]
         else:candidates=candidates[:max_candidates]
-        for g in candidates:
+        return candidates
+
+    def _choose(self,q,candidates,max_candidates,prioritize_gripper_geometry=False,diversify_attempts=False):
+        candidates=list(candidates)
+        _,current_R=self.robot.pose(q)
+        preferred=(self._geometry_priority(q,candidates) if prioritize_gripper_geometry else [])
+        if not prioritize_gripper_geometry:self.geometry_ranking={'status':'disabled'}
+        if self.deadline is not None and time.monotonic()>=self.deadline:
+            self.last_failure='candidate geometry ranking';raise PlanningBudgetExceeded
+        # Preserve the original diverse fallback, including nominally blocked
+        # poses: tolerated IK error can make their actual geometry different.
+        # A nominal proxy is only a search priority, never a hard safety result.
+        first=self._candidate_subset(preferred,current_R,max_candidates)
+        fallback=self._candidate_subset(candidates,current_R,max_candidates)
+        seen={id(g) for g in first}
+        selected=(first+[g for g in fallback if id(g) not in seen])[:max_candidates]
+        indices={id(g):i for i,g in enumerate(candidates)}
+        self.geometry_ranking['selected_priority_candidates']=len(first)
+        self.geometry_ranking['selected_candidate_indices']=[indices[id(g)] for g in selected]
+        self.geometry_ranking.update(priority_pregrasp_ik_attempts=0,
+            priority_pregrasp_ik_solutions=0,priority_candidates_completed=0,
+            attempt_order='round_robin' if diversify_attempts else 'candidate_major')
+        candidates=selected
+        # Opt in to one multistart attempt per selected candidate per round.
+        # Keep the selected order, each candidate's seed schedule, and the
+        # shared deadline; a slow transit must not consume eight turns first.
+        batches=(((g,(attempt,)) for attempt in range(8) for g in candidates)
+            if diversify_attempts else ((g,range(8)) for g in candidates))
+        for g,attempts in batches:
             pre=g.position-g.approach*.08
-            for attempt in range(8):
+            priority=id(g) in seen
+            for attempt in attempts:
+                if self.deadline is not None and time.monotonic()>=self.deadline:
+                    raise PlanningBudgetExceeded
                 seed=q if attempt==0 else np.clip(q+self.rng.normal(0,.25 if attempt<4 else .8,7),self.robot.limits[:,0]+.02,self.robot.limits[:,1]-.02)
                 # Cheap multistart first. Spending the entire budget optimizing
                 # a poorly observed elbow branch prevents testing reachable rolls.
                 qp=self.robot.ik(pre,g.rotation,seed)
+                if priority:self.geometry_ranking['priority_pregrasp_ik_attempts']+=1
                 if qp is None:
                     self.last_failure='pregrasp IK'
                     self.failure_counts[self.last_failure]+=1
                     continue
+                if priority:self.geometry_ranking['priority_pregrasp_ik_solutions']+=1
                 if not self.valid(qp):
                     self.failure_counts['pregrasp: '+self.last_failure]+=1
                     continue
@@ -551,6 +711,7 @@ class Planner:
                 transit=self.plan(q,qp)
                 if transit is not None: return g,transit,approach
                 self.failure_counts[self.last_failure]+=1
+            if priority and attempt==7:self.geometry_ranking['priority_candidates_completed']+=1
         # A single rejected sample must not mask a systematic geometric or IK
         # failure after a recovery view. Ask for more mapping only when unknown
         # space is a material share of the observed candidate failures.
