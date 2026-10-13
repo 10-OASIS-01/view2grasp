@@ -30,6 +30,21 @@ uv run pytest -q
 uv run view2grasp run --task block --seed 3 --root runs/development
 ```
 
+使用 **GLM 视觉 API** 时，将示例复制为不跟踪的 `.env`，在本地编辑器中填写密钥，再显式加载：
+
+```sh
+cp -n .env.glm.example .env
+chmod 600 .env
+# 先在本地编辑 .env，填写 ZHIPU_API_KEY，再运行下面的检查。
+uv run --env-file .env view2grasp check-vlm --output artifacts/glm-check-01
+```
+
+请使用未导出过 VLM 配置的新终端，或按 [GLM 接入说明](docs/glm.md) 清除旧变量。项目不会自动加载 `.env`。GLM 预设使用智谱官方地址和 `glm-5.3-flashx`，默认开启思考、推理强度为 `low`、输出上限为 4096 token；模型、地址、这些参数和超时均可覆盖。账户权限与费用以所用服务为准。上面的原 OpenAI-compatible 配置仍受支持。
+
+`check-vlm` 发送合成图，检查结构化 JSON 和红色方块定位，不启动仿真。报告中的 `success` 只代表此次 API 检查，不代表机器人任务成功；结果和实际响应模型见 `probe_report.json`、`vlm/call_*.json`。`doctor` 的渲染与 `/models` 检查通过，也不等于带图像调用通过。单次方块运行和故障排查见 [GLM 接入说明](docs/glm.md)。
+
+2026-10-11，GLM 预设在 1 次调用、2.144 秒内通过上述合成图检查，实际返回模型为 `glm-5.3-flashx`。这验证了 API 与基础视觉定位，不代表机器人抓取成功。
+
 启用已验证的可选 SAM：
 
 ```sh

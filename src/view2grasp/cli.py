@@ -12,25 +12,35 @@ def doctor(backend:str='tabletop',render:bool=True,output:Path|None=None):
         args=['doctor']+(['--render'] if render else [])+(['--output',output.resolve()] if output else [])
         mobile_process(args);return
     if backend!='tabletop':raise typer.BadParameter('backend must be tabletop or robocasa')
-    import os,sys,platform
+    import sys,platform
     import httpx,numpy as np
     import mujoco,robosuite
     from .sim import Simulator
     from .geometry import cloud,project
+    from .vlm_settings import VLMSettings
+    settings=VLMSettings.from_env()
     sim=Simulator("block",0,128)
     obs=sim.observe()
     points=cloud(obs,8); uv,z=project(points,obs.K,obs.T_wc)
     v,u=np.mgrid[0:128:8,0:128:8]
     error=float(np.max(np.abs(uv-np.stack([u,v],-1).reshape(-1,2))))
-    url=os.getenv("VLM_BASE_URL","http://127.0.0.1:8318/v1")
-    r=httpx.get(url+"/models",headers={"Authorization":"Bearer "+os.getenv("VLM_API_KEY","local")},timeout=10)
+    r=httpx.get(settings.base_url+"/models",headers={"Authorization":"Bearer "+settings.api_key},timeout=10)
     r.raise_for_status()
     report={"python":sys.version,"platform":platform.platform(),"robosuite":robosuite.__version__,"mujoco":mujoco.__version__,
-            "render_ok":True,"reprojection_max_px":error,"models":r.json()}
+            "render_ok":True,"reprojection_max_px":error,"vlm":settings.public_metadata(),"models":r.json()}
     sim.close()
     if output:
         output.parent.mkdir(parents=True,exist_ok=True);output.write_text(json.dumps(report,indent=2))
     print(json.dumps(report,indent=2))
+
+@app.command('check-vlm')
+def check_vlm(output:Path=Path('artifacts/vlm-check')):
+    """Check a live image request and visual grounding without a simulator."""
+    from .vlm_probe import run_vlm_probe
+    report=run_vlm_probe(output)
+    print(json.dumps(report,indent=2))
+    if not report['success']:
+        raise typer.Exit(code=1)
 
 @app.command()
 def run(task:str="block",seed:int=0,strategy:str="active",root:Path=Path("runs/dev"),replay:Path|None=None,config:Path|None=None,backend:str='auto'):
